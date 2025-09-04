@@ -55,7 +55,7 @@ class SimpleRNNClassifier(BaseDeepClassifier):
     >>> X_train, y_train = load_unit_test(split="train")
     >>> clf = SimpleRNNClassifier(n_epochs=20,batch_size=20) # doctest: +SKIP
     >>> clf.fit(X_train, y_train) # doctest: +SKIP
-    ResNetClassifier(...)
+    SimpleRNNClassifier(...)
     """
 
     _tags = {
