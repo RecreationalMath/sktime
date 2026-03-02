@@ -12,27 +12,33 @@ __all__ = ["ForecastingHorizon"]
 import numpy as np
 
 from sktime.forecasting.base._fh_utils import PandasFHConverter
-from sktime.forecasting.base._fh_values import FHValues, FHValueType, validate_freq
-
-# <check></check>
-# this is the marker left to mark all delayed checks
-# all occurences must be removed/addressed before merging this code
+from sktime.forecasting.base._fh_values import (
+    _ABSOLUTE_VALUE_TYPES,
+    _RELATIVE_VALUE_TYPES,
+    _UNSET,
+    FHValueType,
+    is_contiguous,
+    validate_freq,
+)
 
 
 class ForecastingHorizon:
     """Forecasting horizon with pandas-decoupled internals.
 
+    Internally stores values as a sorted, deduplicated int64 numpy array
+    together with metadata (value type, frequency, timezone). This follows
+    the Arrow pattern of Schema (metadata) + Buffer (raw data).
+
     Parameters
     ----------
     values : int, list, np.ndarray, range, pd.Index, pd.Timedelta,
-        pd.offsets.BaseOffset, or FHValues
+        pd.offsets.BaseOffset
         Values of forecasting horizon.
         Supported types without pandas dependency:
         - ``int`` or ``np.integer`` : single integer step
         - ``list[int]`` : list of integer steps
         - ``np.ndarray`` : integer, timedelta64, or datetime64 array
         - ``range`` : Python range object
-        - ``FHValues`` : pre-constructed internal representation
         Supported pandas types (delegated to PandasFHConverter):
         - ``pd.PeriodIndex``, ``pd.DatetimeIndex``, ``pd.TimedeltaIndex``
         - ``pd.RangeIndex``, ``pd.Index`` (integer or timedelta dtype)
@@ -75,19 +81,26 @@ class ForecastingHorizon:
         is_relative: bool | None = None,
         freq=None,
     ):
-        # --- convert values to internal FHValues representation ---
-        # canonical path: already internal (used by _new)
-        if isinstance(values, FHValues):
-            self._fhvalues = values
+        # --- convert values to internal representation ---
         # canonical path: plain Python/numpy types — no pandas needed
-        elif isinstance(values, (int, np.integer)):
+        if isinstance(values, (int, np.integer)):
             arr = np.array([int(values)], dtype=np.int64)
-            self._fhvalues = FHValues(arr, FHValueType.INT)
+            self._values = arr
+            self._value_type = FHValueType.INT
+            self._freq = None
+            self._timezone = None
         elif isinstance(values, range):
             arr = np.array(list(values), dtype=np.int64)
-            self._fhvalues = FHValues(arr, FHValueType.INT)
+            self._values = arr
+            self._value_type = FHValueType.INT
+            self._freq = None
+            self._timezone = None
         elif isinstance(values, np.ndarray):
-            self._fhvalues = self._ndarray_to_internal(values)
+            result = self._ndarray_to_internal(values)
+            self._values = result.values
+            self._value_type = result.value_type
+            self._freq = result.freq
+            self._timezone = result.timezone
         elif (
             isinstance(values, list)
             and len(values) > 0
@@ -102,10 +115,26 @@ class ForecastingHorizon:
                         "All list elements must be of the same type."
                     )
             arr = np.array(values, dtype=np.int64)
-            self._fhvalues = FHValues(arr, FHValueType.INT)
+            self._values = arr
+            self._value_type = FHValueType.INT
+            self._freq = None
+            self._timezone = None
         # coerced path: pandas types and non-int lists — delegate to converter
         else:
-            self._fhvalues = PandasFHConverter.to_internal(values)
+            result = PandasFHConverter.to_internal(values)
+            self._values = result.values
+            self._value_type = result.value_type
+            self._freq = result.freq
+            self._timezone = result.timezone
+
+        # sort and deduplicate values
+        self._values = np.unique(self._values)
+
+        # handle empty arrays
+        if len(self._values) == 0:
+            self._value_type = FHValueType.INT
+            self._freq = None
+            self._timezone = None
 
         # --- set freq via setter (single gate for validation) ---
         if freq is not None:
@@ -115,19 +144,19 @@ class ForecastingHorizon:
         if is_relative is not None:
             if not isinstance(is_relative, bool):
                 raise TypeError("`is_relative` must be a boolean or None")
-            if is_relative and not self._fhvalues.is_relative_type():
+            if is_relative and self._value_type not in _RELATIVE_VALUE_TYPES:
                 raise TypeError(
-                    f"`values` type {self._fhvalues.value_type.name} is "
+                    f"`values` type {self._value_type.name} is "
                     f"not compatible with `is_relative=True`."
                 )
-            if not is_relative and not self._fhvalues.is_absolute_type():
+            if not is_relative and self._value_type not in _ABSOLUTE_VALUE_TYPES:
                 raise TypeError(
-                    f"`values` type {self._fhvalues.value_type.name} is "
+                    f"`values` type {self._value_type.name} is "
                     f"not compatible with `is_relative=False`."
                 )
             self._is_relative = is_relative
         else:
-            self._is_relative = self._infer_is_relative(self._fhvalues.value_type)
+            self._is_relative = self._infer_is_relative(self._value_type)
 
     @staticmethod
     def _infer_is_relative(value_type: FHValueType) -> bool:
@@ -162,8 +191,8 @@ class ForecastingHorizon:
             )
 
     @staticmethod
-    def _ndarray_to_internal(values: np.ndarray) -> FHValues:
-        """Convert 1-D numpy array to FHValues, inferring type from dtype.
+    def _ndarray_to_internal(values: np.ndarray):
+        """Convert 1-D numpy array to _InternalFH, inferring type from dtype.
 
         Parameters
         ----------
@@ -172,7 +201,7 @@ class ForecastingHorizon:
 
         Returns
         -------
-        FHValues
+        _InternalFH
             Internal representation.
 
         Raises
@@ -182,6 +211,8 @@ class ForecastingHorizon:
         TypeError
             If array dtype is not supported.
         """
+        from sktime.forecasting.base._fh_values import _InternalFH
+
         if values.ndim != 1:
             raise ValueError(f"Expected 1-D array, got {values.ndim}-D array")
         if len(values) == 0:
@@ -192,42 +223,92 @@ class ForecastingHorizon:
         # integer, which would cause incorrect classification.
         if np.issubdtype(values.dtype, np.timedelta64):
             arr = values.astype("timedelta64[ns]").view(np.int64).copy()
-            return FHValues(arr, FHValueType.TIMEDELTA)
+            return _InternalFH(arr, FHValueType.TIMEDELTA)
 
         if np.issubdtype(values.dtype, np.datetime64):
             arr = values.astype("datetime64[ns]").view(np.int64).copy()
-            return FHValues(arr, FHValueType.DATETIME)
+            return _InternalFH(arr, FHValueType.DATETIME)
 
         if np.issubdtype(values.dtype, np.integer):
             arr = values.astype(np.int64).copy()
-            return FHValues(arr, FHValueType.INT)
+            return _InternalFH(arr, FHValueType.INT)
 
         raise TypeError(
             f"np.ndarray with dtype {values.dtype} is not supported. "
             f"Expected integer, timedelta64, or datetime64 dtype."
         )
 
-    def _new(self, fhvalues=None, is_relative=None):
-        """Create a new ForecastingHorizon bypassing __init__ conversion.
+    def clone(
+        self,
+        values=None,
+        value_type=None,
+        is_relative=None,
+        freq=_UNSET,
+        timezone=_UNSET,
+    ):
+        """Create a new ForecastingHorizon with selectively replaced attributes.
+
+        Bypasses ``__init__`` conversion logic. Values are sorted and
+        deduplicated when provided.
 
         Parameters
         ----------
-        fhvalues : FHValues, optional
-            New FHValues instance. If None, copies current.
+        values : np.ndarray, optional
+            New values array. If None, copies current values.
+        value_type : FHValueType, optional
+            New value type. If None, uses current value type.
         is_relative : bool, optional
             New is_relative flag. If None, uses current.
+        freq : str or None, optional
+            New freq. If not provided (sentinel), uses current freq.
+        timezone : str or None, optional
+            New timezone. If not provided (sentinel), uses current timezone.
 
         Returns
         -------
         ForecastingHorizon
             New instance with replaced attributes.
         """
-        new_obj = object.__new__(ForecastingHorizon)
-        new_obj._fhvalues = fhvalues if fhvalues is not None else self._fhvalues.copy()
-        new_obj._is_relative = (
-            is_relative if is_relative is not None else self._is_relative
-        )
-        return new_obj
+        new = object.__new__(ForecastingHorizon)
+        new._values = np.unique(values) if values is not None else self._values.copy()
+        new._value_type = value_type if value_type is not None else self._value_type
+        new._is_relative = is_relative if is_relative is not None else self._is_relative
+        new._freq = self._freq if freq is _UNSET else freq
+        new._timezone = self._timezone if timezone is _UNSET else timezone
+        return new
+
+    @classmethod
+    def _from_internal(cls, values, value_type, is_relative, freq=None, timezone=None):
+        """Construct a ForecastingHorizon without coercion.
+
+        This is a fast-path constructor that bypasses ``__init__`` entirely.
+        Values must already be sorted and deduplicated int64.
+
+        Parameters
+        ----------
+        values : np.ndarray
+            Sorted, deduplicated int64 array.
+        value_type : FHValueType
+            Semantic type of the values.
+        is_relative : bool
+            Whether the horizon is relative.
+        freq : str or None, optional
+            Frequency string.
+        timezone : str or None, optional
+            Timezone string.
+
+        Returns
+        -------
+        ForecastingHorizon
+            New instance.
+        """
+        obj = object.__new__(cls)
+        obj._values = values
+        obj._value_type = value_type
+        obj._is_relative = is_relative
+        obj._freq = freq
+        obj._timezone = timezone
+        return obj
 
     @property
     def is_relative(self) -> bool:
@@ -247,7 +328,7 @@ class ForecastingHorizon:
     @property
     def freq(self) -> str | None:
         """Frequency string, or None."""
-        return self._fhvalues.freq
+        return self._freq
 
     @freq.setter
     def freq(self, obj) -> None:
@@ -261,8 +342,8 @@ class ForecastingHorizon:
         For non-string inputs (pd.Index, pd.offsets.BaseOffset, forecaster),
         frequency is extracted and normalized via PandasFHConverter.
 
-        If the FHValues already carry a frequency (inferred from values),
-        the new frequency must match, otherwise a ValueError is raised.
+        If the ForecastingHorizon already carries a frequency (inferred from
+        values), the new frequency must match, otherwise a ValueError is raised.
 
         Parameters
         ----------
@@ -292,23 +373,16 @@ class ForecastingHorizon:
         else:
             new_freq = PandasFHConverter.extract_freq(obj)
 
-        old_freq = self._fhvalues.freq
+        old_freq = self._freq
         if old_freq is not None and new_freq is not None and old_freq != new_freq:
             raise ValueError(
                 f"Frequencies do not match: current={old_freq!r}, new={new_freq!r}"
             )
         if new_freq is not None:
-            self._fhvalues = self._fhvalues._new(freq=new_freq)
+            self._freq = new_freq
 
     # core conversion methods
 
-    # <check>
-    # for a drop-in replacement of the old FH,
-    # we want to allow users to call to_relative without cutoff
-    # but the old FH also raised an error at `cutoff is None`
-    # why not make it explicit and require cutoff to be passed for
-    # to_relative and to_absolute methods?
-    # </check>
     def to_relative(self, cutoff=None):
         """Return relative version of forecasting horizon.
 
@@ -323,7 +397,7 @@ class ForecastingHorizon:
             Relative representation of forecasting horizon.
         """
         if self._is_relative:
-            return self._new()
+            return self.clone()
 
         if cutoff is None:
             raise ValueError(
@@ -350,12 +424,9 @@ class ForecastingHorizon:
         # vtype can only be absolute types (PERIOD, DATETIME, or INT) at this point,
         # because if it were a relative type,
         # to_relative would return at the start of the method
-        vtype = self._fhvalues.value_type
-        vals = self._fhvalues.values
+        vtype = self._value_type
+        vals = self._values
 
-        # <check>
-        # PandasFHConverter methods not yet implemented
-        # </check>
         if vtype == FHValueType.PERIOD:
             # ordinal difference -> integer steps
             # divide by freq multiplier to get step count
@@ -365,10 +436,12 @@ class ForecastingHorizon:
                 mult = PandasFHConverter.freq_multiplier(freq)
                 if mult != 1:
                     relative_vals = relative_vals // mult
-            fhv = FHValues(relative_vals.astype(np.int64), FHValueType.INT, freq=freq)
-            return self._new(fhvalues=fhv, is_relative=True)
-            # another place where _new is needed to create a new ForecastingHorizon
-            # instance with modified values but same metadata
+            return self.clone(
+                values=relative_vals.astype(np.int64),
+                value_type=FHValueType.INT,
+                freq=freq,
+                is_relative=True,
+            )
 
         if vtype == FHValueType.DATETIME:
             # nanosecond difference
@@ -378,17 +451,30 @@ class ForecastingHorizon:
                 relative_vals = PandasFHConverter.nanos_to_steps(
                     relative_nanos, freq, ref_nanos=cutoff_val
                 )
-                fhv = FHValues(relative_vals, FHValueType.INT, freq=freq)
+                return self.clone(
+                    values=relative_vals,
+                    value_type=FHValueType.INT,
+                    freq=freq,
+                    is_relative=True,
+                )
             else:
                 # no freq: return as TIMEDELTA nanoseconds
-                fhv = FHValues(relative_nanos, FHValueType.TIMEDELTA, freq=freq)
-            return self._new(fhvalues=fhv, is_relative=True)
+                return self.clone(
+                    values=relative_nanos,
+                    value_type=FHValueType.TIMEDELTA,
+                    freq=freq,
+                    is_relative=True,
+                )
 
         if vtype == FHValueType.INT:
             # absolute int - cutoff int -> relative int
             relative_vals = vals - cutoff_val
-            fhv = FHValues(relative_vals.astype(np.int64), FHValueType.INT, freq=freq)
-            return self._new(fhvalues=fhv, is_relative=True)
+            return self.clone(
+                values=relative_vals.astype(np.int64),
+                value_type=FHValueType.INT,
+                freq=freq,
+                is_relative=True,
+            )
 
         # if we reach this point,
         # it means the value type is not compatible with relative representation
@@ -410,8 +496,7 @@ class ForecastingHorizon:
             Absolute representation of forecasting horizon.
         """
         if not self._is_relative:
-            # <check> _new is not yet implemented </check>"
-            return self._new()
+            return self.clone()
 
         cutoff_val, cutoff_type, cutoff_freq, cutoff_tz = (
             PandasFHConverter.cutoff_to_internal(cutoff, freq=self.freq)
@@ -433,8 +518,8 @@ class ForecastingHorizon:
         # vtype can only be relative types (INT or TIMEDELTA) at this point,
         # because if it were an absolute type,
         # to_absolute would return at the start of the method
-        vtype = self._fhvalues.value_type
-        vals = self._fhvalues.values
+        vtype = self._value_type
+        vals = self._values
 
         if vtype == FHValueType.INT:
             if cutoff_type == FHValueType.PERIOD:
@@ -447,12 +532,12 @@ class ForecastingHorizon:
                     if mult != 1:
                         step_vals = vals * mult
                 absolute_vals = cutoff_val + step_vals
-                fhv = FHValues(
-                    absolute_vals.astype(np.int64),
-                    FHValueType.PERIOD,
+                return self.clone(
+                    values=absolute_vals.astype(np.int64),
+                    value_type=FHValueType.PERIOD,
                     freq=freq,
+                    is_relative=False,
                 )
-                return self._new(fhvalues=fhv, is_relative=False)
             if cutoff_type == FHValueType.DATETIME:
                 if freq is None:
                     raise ValueError(
@@ -464,34 +549,34 @@ class ForecastingHorizon:
                     vals, freq, ref_nanos=cutoff_val
                 )
                 absolute_vals = cutoff_val + nanos
-                fhv = FHValues(
-                    absolute_vals.astype(np.int64),
-                    FHValueType.DATETIME,
+                return self.clone(
+                    values=absolute_vals.astype(np.int64),
+                    value_type=FHValueType.DATETIME,
                     freq=freq,
                     timezone=cutoff_tz,
+                    is_relative=False,
                 )
-                return self._new(fhvalues=fhv, is_relative=False)
 
             if cutoff_type == FHValueType.INT:
                 # int + int -> int (absolute)
                 absolute_vals = cutoff_val + vals
-                fhv = FHValues(
-                    absolute_vals.astype(np.int64),
-                    FHValueType.INT,
+                return self.clone(
+                    values=absolute_vals.astype(np.int64),
+                    value_type=FHValueType.INT,
                     freq=freq,
+                    is_relative=False,
                 )
-                return self._new(fhvalues=fhv, is_relative=False)
         if vtype == FHValueType.TIMEDELTA:
             if cutoff_type == FHValueType.DATETIME:
                 # nanos + nanos -> absolute datetime nanos
                 absolute_vals = cutoff_val + vals
-                fhv = FHValues(
-                    absolute_vals.astype(np.int64),
-                    FHValueType.DATETIME,
+                return self.clone(
+                    values=absolute_vals.astype(np.int64),
+                    value_type=FHValueType.DATETIME,
                     freq=freq,
                     timezone=cutoff_tz,
+                    is_relative=False,
                 )
-                return self._new(fhvalues=fhv, is_relative=False)
         # if we reach this point,
         # it means the value type is not compatible with absolute representation
         raise TypeError(
@@ -507,7 +592,9 @@ class ForecastingHorizon:
         pd.Index
             Pandas Index containing the forecasting horizon values.
         """
-        return PandasFHConverter.to_pandas_index(self._fhvalues)
+        return PandasFHConverter.to_pandas_index(
+            self._values, self._value_type, self._freq, self._timezone
+        )
 
     def to_numpy(self, **kwargs) -> np.ndarray:
         """Return forecasting horizon values as numpy array.
@@ -517,7 +604,7 @@ class ForecastingHorizon:
         np.ndarray
             Numpy array of int64 values.
         """
-        return self._fhvalues.values.copy()
+        return self._values.copy()
 
     def to_absolute_index(self, cutoff=None):
         """Return absolute values as pandas Index.
@@ -551,9 +638,9 @@ class ForecastingHorizon:
         """
         # get absolute representation
         absolute = self.to_absolute(cutoff)
-        abs_vals = absolute._fhvalues.values
-        abs_type = absolute._fhvalues.value_type
-        abs_freq = absolute._fhvalues.freq
+        abs_vals = absolute._values
+        abs_type = absolute._value_type
+        abs_freq = absolute._freq
 
         # convert start to internal
         start_val, start_type, start_freq, _ = PandasFHConverter.cutoff_to_internal(
@@ -570,27 +657,16 @@ class ForecastingHorizon:
                     if freq is None:
                         freq = candidate
                     elif candidate != freq:
-                        # below error message may need better wording
-                        # the idea is to flag any mismatch between the three freqs
                         raise ValueError(
                             f"Frequency mismatch in to_absolute_int: "
                             f"abs_freq={abs_freq}, self.freq={self.freq}, "
                             f"start_freq={start_freq}. All must agree."
                         )
-            # <check> Can the freq be ever None here? If so, how to handle? </check>
             # divide by freq multiplier for multi-step freqs
             if freq is not None:
                 mult = PandasFHConverter.freq_multiplier(freq)
                 if mult != 1:
                     integers = integers // mult
-            else:
-                # <check>
-                # no freq available
-                # raw ordinal differences may be incorrect for multi-step frequencies
-                # but we have no way to normalize without freq information
-                # should this be flagged as a warning? or an error? or just left as is?
-                # </check>
-                pass
         elif abs_type == FHValueType.DATETIME:
             nanos_diff = abs_vals - start_val
             # check for frequency mismatch between FH freq, cutoff freq, and start freq
@@ -600,8 +676,6 @@ class ForecastingHorizon:
                     if freq is None:
                         freq = candidate
                     elif candidate != freq:
-                        # below error message may need better wording
-                        # the idea is to flag any mismatch between the three freqs
                         raise ValueError(
                             f"Frequency mismatch in to_absolute_int: "
                             f"abs_freq={abs_freq}, self.freq={self.freq}, "
@@ -617,8 +691,12 @@ class ForecastingHorizon:
         else:
             integers = abs_vals - start_val
 
-        fhv = FHValues(integers.astype(np.int64), FHValueType.INT, freq=self.freq)
-        return self._new(fhvalues=fhv, is_relative=False)
+        return self.clone(
+            values=integers.astype(np.int64),
+            value_type=FHValueType.INT,
+            freq=self.freq,
+            is_relative=False,
+        )
 
     # In-sample and out-of-sample methods
 
@@ -628,7 +706,7 @@ class ForecastingHorizon:
         In-sample values have relative representation <= 0.
         """
         relative = self.to_relative(cutoff)
-        return relative._fhvalues.values <= 0
+        return relative._values <= 0
 
     def _is_out_of_sample(self, cutoff=None) -> np.ndarray:
         """Return boolean array indicating out-of-sample values."""
@@ -676,9 +754,8 @@ class ForecastingHorizon:
             In-sample values of forecasting horizon.
         """
         mask = self._is_in_sample(cutoff)
-        filtered_vals = self._fhvalues.values[mask]
-        fhv = self._fhvalues._new(values=filtered_vals)
-        return self._new(fhvalues=fhv)
+        filtered_vals = self._values[mask]
+        return self.clone(values=filtered_vals)
 
     def to_out_of_sample(self, cutoff=None):
         """Return out-of-sample values of fh.
@@ -694,13 +771,10 @@ class ForecastingHorizon:
             Out-of-sample values of forecasting horizon.
         """
         mask = self._is_out_of_sample(cutoff)
-        filtered_vals = self._fhvalues.values[mask]
-        fhv = self._fhvalues._new(values=filtered_vals)
-        return self._new(fhvalues=fhv)
+        filtered_vals = self._values[mask]
+        return self.clone(values=filtered_vals)
 
     # indexer method
-    # <check> partial implementation, supports relative integer FH
-    # </check>
     def to_indexer(self, cutoff=None, from_cutoff=True):
         """Return zero-based indexer for array access.
 
@@ -719,9 +793,9 @@ class ForecastingHorizon:
         """
         if from_cutoff:
             relative = self.to_relative(cutoff)
-            vtype = relative._fhvalues.value_type
+            vtype = relative._value_type
             if vtype == FHValueType.INT:
-                indexer_vals = relative._fhvalues.values - 1
+                indexer_vals = relative._values - 1
             elif vtype == FHValueType.TIMEDELTA:
                 freq = self.freq
                 if freq is None and cutoff is not None:
@@ -747,7 +821,7 @@ class ForecastingHorizon:
                 # convert timedelta nanos to integer steps, then zero-base
                 indexer_vals = (
                     PandasFHConverter.nanos_to_steps(
-                        relative._fhvalues.values, freq, ref_nanos=ref_nanos
+                        relative._values, freq, ref_nanos=ref_nanos
                     )
                     - 1
                 )
@@ -758,11 +832,12 @@ class ForecastingHorizon:
                 )
         else:
             relative = self.to_relative(cutoff)
-            vals = relative._fhvalues.values
+            vals = relative._values
             indexer_vals = vals - vals[0]
 
-        fhv = FHValues(indexer_vals.astype(np.int64), FHValueType.INT)
-        return PandasFHConverter.to_pandas_index(fhv)
+        return PandasFHConverter.to_pandas_index(
+            indexer_vals.astype(np.int64), FHValueType.INT
+        )
 
     def _is_contiguous(self) -> bool:
         """Check if forecasting horizon values form a contiguous sequence.
@@ -771,7 +846,7 @@ class ForecastingHorizon:
         -------
         bool
         """
-        return self._fhvalues.is_contiguous()
+        return is_contiguous(self._values, self._value_type)
 
     def get_expected_pred_idx(self, y=None, cutoff=None, sort_by_time=False):
         """Construct expected prediction output index.
@@ -797,162 +872,118 @@ class ForecastingHorizon:
             sort_by_time=sort_by_time,
         )
 
-    # Dunders -> Arithmatic operators
+    # Dunders -> Arithmetic operators
 
     def __add__(self, other):
         if isinstance(other, ForecastingHorizon):
-            result = self._fhvalues.values + other._fhvalues.values
+            result = self._values + other._values
         else:
-            result = self._fhvalues.values + np.int64(other)
-        fhv = self._fhvalues._new(values=result)
-        return self._new(fhvalues=fhv)
+            result = self._values + np.int64(other)
+        return self.clone(values=result)
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __sub__(self, other):
         if isinstance(other, ForecastingHorizon):
-            result = self._fhvalues.values - other._fhvalues.values
+            result = self._values - other._values
         else:
-            result = self._fhvalues.values - np.int64(other)
-        fhv = self._fhvalues._new(values=result)
-        return self._new(fhvalues=fhv)
+            result = self._values - np.int64(other)
+        return self.clone(values=result)
 
     def __rsub__(self, other):
-        # not checking if other is FH here
-        # because __rsub__ is mostly called
-        # when other does not support the operation with FH,
-        # in which case we want to treat other as a scalar.
-        # If other is FH, then other minus self
-        # would have been handled by other.__sub__
-        # and this method would not be called
-        result = np.int64(other) - self._fhvalues.values
-        fhv = self._fhvalues._new(values=result)
-        return self._new(fhvalues=fhv)
+        result = np.int64(other) - self._values
+        return self.clone(values=result)
 
     def __mul__(self, other):
         if isinstance(other, ForecastingHorizon):
-            result = self._fhvalues.values * other._fhvalues.values
+            result = self._values * other._values
         else:
-            result = self._fhvalues.values * np.int64(other)
-        fhv = self._fhvalues._new(values=result)
-        return self._new(fhvalues=fhv)
+            result = self._values * np.int64(other)
+        return self.clone(values=result)
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     # Dunders -> comparison operators
     # Note:
-    # for euqality operator we can either do:
-    # 1. Element-wise comparison (numpy-style):
-    #   compare only raw int64 arrays elementwise
-    #   and return a boolean array,
-    #   fh == 3 → array([False, False, True])
-    # 2.Object identity/equality (Python-style):
-    #   "are these two FH objects the same?"
-    #   compare the entire FHValues instances,
-    #   which would take into account the value type,
-    #   freq, and timezone as well and return a single boolean
-    #   indicating whether the two FHValues instances are equal in all aspects.
-    #
-    # Number 2 seems more consistent with how equality is usually
-    # implemented in Python classes,
-    # but 1 might be usefull for comparing two forecasting horizons elementwise,
-    # for example when aligning two forecasting horizons with different cutoffs.
-    #
-    # Current implementation is for number 1
+    # Current implementation uses element-wise comparison (numpy-style):
+    # fh == 3 → array([False, False, True])
 
     def __eq__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values == other._fhvalues.values
-        return self._fhvalues.values == np.int64(other)
+            return self._values == other._values
+        return self._values == np.int64(other)
 
     def __ne__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values != other._fhvalues.values
-        return self._fhvalues.values != np.int64(other)
+            return self._values != other._values
+        return self._values != np.int64(other)
 
     def __lt__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values < other._fhvalues.values
-        return self._fhvalues.values < np.int64(other)
+            return self._values < other._values
+        return self._values < np.int64(other)
 
     def __le__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values <= other._fhvalues.values
-        return self._fhvalues.values <= np.int64(other)
+            return self._values <= other._values
+        return self._values <= np.int64(other)
 
     def __gt__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values > other._fhvalues.values
-        return self._fhvalues.values > np.int64(other)
+            return self._values > other._values
+        return self._values > np.int64(other)
 
     def __ge__(self, other):
         if isinstance(other, ForecastingHorizon):
-            return self._fhvalues.values >= other._fhvalues.values
-        return self._fhvalues.values >= np.int64(other)
+            return self._values >= other._values
+        return self._values >= np.int64(other)
 
     # Dunders -> container methods len, getitem, max, min
     def __len__(self):
-        return len(self._fhvalues)
+        return len(self._values)
 
     def __getitem__(self, key):
-        result = self._fhvalues[key]
-        if isinstance(result, FHValues):
-            return self._new(fhvalues=result)
+        result = self._values[key]
+        if isinstance(result, np.ndarray):
+            return self.clone(values=result)
         # scalar — return as-is
         return result
 
     def max(self):
         """Return the maximum value."""
-        return self._fhvalues.max()
+        return self._values.max() if len(self._values) > 0 else None
 
     def min(self):
         """Return the minimum value."""
-        return self._fhvalues.min()
+        return self._values.min() if len(self._values) > 0 else None
 
-    # Below method computes a hash for the ForecastingHorizon instance,
-    # The hash is computed based on the tuple containing:
-    # 1. the internal FHValues instance which itself has a custom __hash__ based
-    #    on its int64 array bytes + metadata
-    # 2. the is_relative boolean flag, natively hashable
-    # <check>
-    # this implementation assumes that FHValues
-    # has a proper __hash__ method implemented.
-    # Note: currently there's an inconsistency between __eq__ and __hash__
-    # Python requires:
-    #   If a == b, then hash(a) == hash(b)
-    # current __eq__ only compares raw int64 arrays element-wise
-    # and returns a numpy array, not a bool.
-    # while __hash__ considers numpy array + all metadata + is_relative.
-    # This violates the contract.
-    # Two objects could be "=="" (same raw values)
-    # but have different hashes (different freq or is_relative).
-    # To fix, either:
-    # Make __eq__ return a single bool comparing all attributes when other is
-    # ForecastingHorizon, or
-    # Move element-wise comparison to a separate method
-    # and keep __eq__ consistent with __hash__.
-    # Need to consider this in th context of forecasting horizon usage.
-    # </check>
     def __hash__(self):
-        return hash((self._fhvalues, self._is_relative))
+        return hash(
+            (
+                self._values.tobytes(),
+                self._value_type,
+                self._is_relative,
+                self._freq,
+                self._timezone,
+            )
+        )
 
     def __repr__(self):
         class_name = type(self).__name__
-        vals = self._fhvalues
-        vtype = vals.value_type.name
-        n = len(vals)
+        vtype = self._value_type.name
+        n = len(self._values)
         parts = [f"n={n}", f"type={vtype}", f"is_relative={self._is_relative}"]
-        if vals.freq is not None:
-            parts.append(f"freq={vals.freq!r}")
+        if self._freq is not None:
+            parts.append(f"freq={self._freq!r}")
         # if less than 6 values, show all values in repr,
         # otherwise show 1st and last 3 only
         if n <= 6:
-            parts.append(f"values={vals.values.tolist()}")
+            parts.append(f"values={self._values.tolist()}")
         else:
-            head = vals.values[:3].tolist()
-            tail = vals.values[-3:].tolist()
+            head = self._values[:3].tolist()
+            tail = self._values[-3:].tolist()
             parts.append(
                 f"values=[{head[0]}, {head[1]}, {head[2]}, ..., "
                 f"{tail[0]}, {tail[1]}, {tail[2]}]"

@@ -3,15 +3,15 @@
 """Isolated pandas conversion layer for ForecastingHorizon.
 
 ALL pandas-specific imports and logic live in this module.
-The core _FHValues and ForecastingHorizon classes should never import pandas directly,
-they go through this converter instead.
+The core ForecastingHorizon class should never import pandas directly,
+it goes through this converter instead.
 
 This module handles:
 Converting user-facing input types (int, list, pd.Index, etc.)
-to the internal _FHValues representation.
-Converting _FHValues back to pd.Index for interoperability with sktime.
+to the internal _InternalFH representation.
+Converting internal values back to pd.Index for interoperability with sktime.
 Extracting and normalizing frequency strings from pandas objects.
-Converting cutoff values from pandas types to _FHValues.
+Converting cutoff values from pandas types to internal representation.
 """
 
 ___all__ = ["PandasFHConverter"]
@@ -19,20 +19,21 @@ ___all__ = ["PandasFHConverter"]
 import numpy as np
 import pandas as pd
 
-from sktime.forecasting.base._fh_values import FHValues, FHValueType
+from sktime.forecasting.base._fh_values import FHValueType, _InternalFH
 
 
 class PandasFHConverter:
-    """Static conversion layer between pandas types and FHValues.
+    """Static conversion layer between pandas types and ForecastingHorizon.
 
     This class collects all pandas-coupled logic in one place so that
     the rest of the ForecastingHorizon code can remain pandas-free.
+    All methods are stateless.
     """
 
-    # input -> FHValues (internal representation) conversion
+    # input -> _InternalFH (internal representation) conversion
     @staticmethod
-    def to_internal(values) -> FHValues:
-        """Convert pandas input values to internal FHValues representation.
+    def to_internal(values) -> _InternalFH:
+        """Convert pandas input values to internal _InternalFH representation.
 
         Frequency is inferred from values only. The ``freq`` parameter on
         ``ForecastingHorizon`` is handled separately by the ``freq`` setter,
@@ -56,7 +57,7 @@ class PandasFHConverter:
 
         Returns
         -------
-        FHValues
+        _InternalFH
             Internal representation with int64 numpy array.
 
         Raises
@@ -68,39 +69,39 @@ class PandasFHConverter:
         if isinstance(values, pd.Timedelta):
             arr = np.array([values.value], dtype=np.int64)
             freq_str = PandasFHConverter._extract_freq_str(values)
-            return FHValues(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
         if isinstance(values, pd.offsets.BaseOffset):
             td = pd.Timedelta(values)
             arr = np.array([td.value], dtype=np.int64)
             freq_str = PandasFHConverter._offset_to_freq_str(values)
-            return FHValues(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
 
         # pandas Index types (specific types checked before generic)
         if isinstance(values, pd.PeriodIndex):
             arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
-            return FHValues(arr, FHValueType.PERIOD, freq=freq_str)
+            return _InternalFH(arr, FHValueType.PERIOD, freq=freq_str)
         if isinstance(values, pd.DatetimeIndex):
             arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
             tz = str(values.tz) if values.tz is not None else None
-            return FHValues(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
+            return _InternalFH(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
         if isinstance(values, pd.TimedeltaIndex):
             arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
-            return FHValues(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
         if isinstance(values, pd.RangeIndex):
             arr = values.to_numpy().astype(np.int64)
-            return FHValues(arr, FHValueType.INT)
+            return _InternalFH(arr, FHValueType.INT)
 
         # generic pd.Index - convert based on dtype
         if isinstance(values, pd.Index):
             if pd.api.types.is_integer_dtype(values.dtype):
                 arr = values.to_numpy().astype(np.int64)
-                return FHValues(arr, FHValueType.INT)
+                return _InternalFH(arr, FHValueType.INT)
             if pd.api.types.is_timedelta64_dtype(values.dtype):
                 arr = values.to_numpy().view(np.int64).copy()
-                return FHValues(arr, FHValueType.TIMEDELTA)
+                return _InternalFH(arr, FHValueType.TIMEDELTA)
             raise TypeError(
                 f"pd.Index with dtype {values.dtype} is not supported. "
                 f"Expected integer or timedelta dtype."
@@ -121,8 +122,8 @@ class PandasFHConverter:
         )
 
     @staticmethod
-    def _list_to_internal(values: list) -> FHValues:
-        """Convert list of supported scalar types to FHValues."""
+    def _list_to_internal(values: list) -> _InternalFH:
+        """Convert list of supported scalar types to _InternalFH."""
         from datetime import timedelta as _timedelta
 
         if len(values) == 0:
@@ -136,7 +137,7 @@ class PandasFHConverter:
             PandasFHConverter._check_list_homogeneity(values, _timedelta_types)
             idx = pd.TimedeltaIndex(values)
             arr = idx.asi8.copy()
-            return FHValues(arr, FHValueType.TIMEDELTA)
+            return _InternalFH(arr, FHValueType.TIMEDELTA)
 
         # period values — extract ordinals via PeriodIndex
         if isinstance(values[0], pd.Period):
@@ -144,7 +145,7 @@ class PandasFHConverter:
             idx = pd.PeriodIndex(values)
             arr = idx.asi8.copy()
             freq_str = PandasFHConverter._freqstr(idx)
-            return FHValues(arr, FHValueType.PERIOD, freq=freq_str)
+            return _InternalFH(arr, FHValueType.PERIOD, freq=freq_str)
 
         # timestamp values — extract nanoseconds via DatetimeIndex
         if isinstance(values[0], pd.Timestamp):
@@ -153,7 +154,7 @@ class PandasFHConverter:
             arr = idx.asi8.copy()
             freq_str = PandasFHConverter._freqstr(idx)
             tz = str(idx.tz) if idx.tz is not None else None
-            return FHValues(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
+            return _InternalFH(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
 
         # offset objects — convert to Timedelta first
         if isinstance(values[0], pd.offsets.BaseOffset):
@@ -161,51 +162,58 @@ class PandasFHConverter:
             tds = [pd.Timedelta(v) for v in values]
             idx = pd.TimedeltaIndex(tds)
             arr = idx.asi8.copy()
-            return FHValues(arr, FHValueType.TIMEDELTA)
+            return _InternalFH(arr, FHValueType.TIMEDELTA)
 
         raise TypeError(
             f"List with element type {type(values[0]).__name__} is not supported."
         )
 
-    # FHValues (internal representation) -> pandas conversion
+    # internal representation -> pandas conversion
     @staticmethod
-    def to_pandas_index(fhv: "FHValues") -> pd.Index:
-        """Convert internal FHValues to pandas Index.
+    def to_pandas_index(
+        values: np.ndarray,
+        value_type: FHValueType,
+        freq: str | None = None,
+        timezone: str | None = None,
+    ) -> pd.Index:
+        """Convert internal values to pandas Index.
 
         Parameters
         ----------
-        fhv : FHValues
-            Internal representation.
+        values : np.ndarray
+            Int64 numpy array of horizon values.
+        value_type : FHValueType
+            Semantic type of the values.
+        freq : str or None
+            Frequency string for PERIOD/DATETIME types.
+        timezone : str or None
+            Timezone string for DATETIME type.
 
         Returns
         -------
         pd.Index
             Pandas Index matching the semantic type.
         """
-        vtype = fhv.value_type
-        vals = fhv.values  # read-only view, int64
+        if value_type == FHValueType.INT:
+            return pd.Index(values.copy(), dtype=int)
 
-        if vtype == FHValueType.INT:
-            return pd.Index(vals.copy(), dtype=int)
-
-        if vtype == FHValueType.PERIOD:
+        if value_type == FHValueType.PERIOD:
             # PeriodIndex from ordinals requires a writable copy
-            return pd.PeriodIndex.from_ordinals(vals.copy(), freq=fhv.freq)
+            return pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
 
-        if vtype == FHValueType.DATETIME:
-            dt_arr = vals.copy().view("datetime64[ns]")
+        if value_type == FHValueType.DATETIME:
+            dt_arr = values.copy().view("datetime64[ns]")
             idx = pd.DatetimeIndex(dt_arr)
-            if fhv.timezone is not None:
-                idx = idx.tz_localize("UTC").tz_convert(fhv.timezone)
+            if timezone is not None:
+                idx = idx.tz_localize("UTC").tz_convert(timezone)
             return idx
 
-        if vtype == FHValueType.TIMEDELTA:
-            td_arr = vals.copy().view("timedelta64[ns]")
+        if value_type == FHValueType.TIMEDELTA:
+            td_arr = values.copy().view("timedelta64[ns]")
             return pd.TimedeltaIndex(td_arr)
 
-        # control should never reach here due to FHValueType validation in FHValues
-        # if it does, it indicates a bug in FHValues or a missing case in this function
-        raise ValueError(f"Unknown FHValueType: {vtype}")
+        # control should never reach here due to FHValueType validation
+        raise ValueError(f"Unknown FHValueType: {value_type}")
 
     # cutoff conversion
     @staticmethod
@@ -321,26 +329,6 @@ class PandasFHConverter:
         """
         if freq_str is None:
             return None
-        # <check>
-        # 1. check for unsupported frequencies and raise informative errors
-        # 2. check for completeness of the alias map and add any missing aliases
-        # 3. is there way to leverage pandas frequency parsing/normalization logic
-        #    instead of hardcoding an alias map here?
-        # 4. if we keep the alias map, make it more comprehensive and robust,
-        #    and add tests for it.
-        #    For example, handling both "M" and "ME" for month-end frequencies,
-        #    and ensuring that all common aliases are covered.
-        # 5. whether to handle frequency strings in a case-insensitive manner,
-        #    e.g. treating "m" and "M" as the same frequency,
-        #    and whether to add checks for that.
-        # 6. whether to use pandas.tseries.frequencies.to_offset to validate and
-        #    normalize freq strings, which would leverage pandas'
-        #    internal logic and ensure consistency with pandas behavior.
-        #    one way of achieving 1. and 2. without hardcoding an alias map
-        #    if it succeeds,
-        #    use the resulting offset's name as the normalized freq string.
-        # 7. Make the alias map a frozenset to prevent accidental modifications
-        # </check>
         alias_map = {
             "ME": "M",
             "QE": "Q",
