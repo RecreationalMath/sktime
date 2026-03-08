@@ -6,20 +6,18 @@ ALL pandas-specific imports and logic live in this module.
 The core ForecastingHorizon class should never import pandas directly,
 it goes through this converter instead.
 
-This module handles:
-Converting user-facing input types (int, list, pd.Index, etc.)
-to the internal _InternalFH representation.
-Converting internal values back to pd.Index for interoperability with sktime.
-Extracting and normalizing frequency strings from pandas objects.
-Converting cutoff values from pandas types to internal representation.
+Architecture A: All temporal inputs are normalized to integer steps
+(period ordinals) at construction. The converter handles:
+- Converting user-facing pandas types to integer steps + metadata
+- Converting integer steps back to pandas Index for output
+- Extracting and normalizing frequency strings from pandas objects
+- Converting cutoff values to integer steps
 """
 
 ___all__ = ["PandasFHConverter"]
 
 import numpy as np
 import pandas as pd
-
-from sktime.forecasting.base._fh_values import FHValueType, _InternalFH
 
 
 class PandasFHConverter:
@@ -28,80 +26,117 @@ class PandasFHConverter:
     This class collects all pandas-coupled logic in one place so that
     the rest of the ForecastingHorizon code can remain pandas-free.
     All methods are stateless.
+
+    Architecture A: to_internal() normalizes all temporal inputs to integer
+    steps (period ordinals for absolute types, step counts for relative types).
+    No FHValueType enum is used.
     """
 
-    # input -> _InternalFH (internal representation) conversion
-    @staticmethod
-    def to_internal(values) -> _InternalFH:
-        """Convert pandas input values to internal _InternalFH representation.
+    # ---- input -> internal representation conversion ----
 
-        Frequency is inferred from values only. The ``freq`` parameter on
-        ``ForecastingHorizon`` is handled separately by the ``freq`` setter,
-        which is the single gate for all frequency setting and validation.
+    @staticmethod
+    def to_internal(values) -> tuple:
+        """Convert pandas input values to internal representation.
+
+        All temporal inputs are normalized to integer steps:
+        - PeriodIndex: .asi8 gives period ordinals (already integer steps)
+        - DatetimeIndex with freq: .to_period(freq).asi8 gives ordinals
+        - DatetimeIndex without freq: raises ValueError (freq required)
+        - TimedeltaIndex with freq: timedelta / freq_timedelta gives steps
+        - TimedeltaIndex without freq: stores nanoseconds with
+          values_are_nanos=True (deferred conversion)
+
+        The converter infers is_relative from the input type:
+        - PeriodIndex, DatetimeIndex -> absolute (is_relative=False)
+        - TimedeltaIndex -> relative (is_relative=True)
+        - RangeIndex, integer Index -> relative (is_relative=True)
 
         Parameters
         ----------
         values : pandas type or list of pandas scalars
             Forecasting horizon values in a pandas-specific format.
-            Supported types:
-            - ``pd.PeriodIndex`` : converted to PERIOD ordinals
-            - ``pd.DatetimeIndex`` : converted to DATETIME nanoseconds
-            - ``pd.TimedeltaIndex`` : converted to TIMEDELTA nanoseconds
-            - ``pd.RangeIndex`` : converted to INT
-            - ``pd.Index`` with integer or timedelta64 dtype
-            - ``pd.Timedelta`` : single timedelta scalar
-            - ``pd.offsets.BaseOffset`` : single offset scalar
-            - ``list`` of ``pd.Period``, ``pd.Timestamp``, ``pd.Timedelta``,
-              ``pd.offsets.BaseOffset``, ``np.timedelta64``, or
-              ``datetime.timedelta`` scalars
 
         Returns
         -------
-        _InternalFH
-            Internal representation with int64 numpy array.
+        tuple of (np.ndarray, bool, str or None, bool)
+            (values, is_relative, freq, values_are_nanos).
 
         Raises
         ------
         TypeError
             If ``values`` type is not supported.
+        ValueError
+            If DatetimeIndex is provided without freq.
         """
-        # pandas Timedelta and offset objects
+        # pandas Timedelta scalar
         if isinstance(values, pd.Timedelta):
-            arr = np.array([values.value], dtype=np.int64)
             freq_str = PandasFHConverter._extract_freq_str(values)
-            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            if freq_str is not None:
+                steps = PandasFHConverter._timedelta_to_steps(
+                    np.array([values.value], dtype=np.int64), freq_str
+                )
+                return (steps, True, freq_str, False)
+            else:
+                arr = np.array([values.value], dtype=np.int64)
+                return (arr, True, None, True)
+
+        # pandas offset scalar
         if isinstance(values, pd.offsets.BaseOffset):
             td = pd.Timedelta(values)
-            arr = np.array([td.value], dtype=np.int64)
             freq_str = PandasFHConverter._offset_to_freq_str(values)
-            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            if freq_str is not None:
+                steps = PandasFHConverter._timedelta_to_steps(
+                    np.array([td.value], dtype=np.int64), freq_str
+                )
+                return (steps, True, freq_str, False)
+            else:
+                arr = np.array([td.value], dtype=np.int64)
+                return (arr, True, None, True)
 
-        # pandas Index types (specific types checked before generic)
+        # PeriodIndex -> ordinals (already integer steps)
         if isinstance(values, pd.PeriodIndex):
             arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
-            return _InternalFH(arr, FHValueType.PERIOD, freq=freq_str)
+            return (arr, False, freq_str, False)
+
+        # DatetimeIndex -> convert to period ordinals
         if isinstance(values, pd.DatetimeIndex):
-            arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
-            tz = str(values.tz) if values.tz is not None else None
-            return _InternalFH(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
+            if freq_str is None:
+                raise ValueError(
+                    "DatetimeIndex without freq is not supported. "
+                    "Provide freq explicitly via "
+                    "ForecastingHorizon(values, freq=...) or use a "
+                    "DatetimeIndex with freq set."
+                )
+            arr = values.to_period(freq_str).asi8.copy()
+            return (arr, False, freq_str, False)
+
+        # TimedeltaIndex -> steps (with freq) or nanos (without freq)
         if isinstance(values, pd.TimedeltaIndex):
-            arr = values.asi8.copy()
             freq_str = PandasFHConverter._freqstr(values)
-            return _InternalFH(arr, FHValueType.TIMEDELTA, freq=freq_str)
+            if freq_str is not None:
+                steps = PandasFHConverter._timedelta_to_steps(
+                    values.asi8.copy(), freq_str
+                )
+                return (steps, True, freq_str, False)
+            else:
+                arr = values.asi8.copy()
+                return (arr, True, None, True)
+
+        # RangeIndex -> plain integers
         if isinstance(values, pd.RangeIndex):
             arr = values.to_numpy().astype(np.int64)
-            return _InternalFH(arr, FHValueType.INT)
+            return (arr, True, None, False)
 
-        # generic pd.Index - convert based on dtype
+        # generic pd.Index
         if isinstance(values, pd.Index):
             if pd.api.types.is_integer_dtype(values.dtype):
                 arr = values.to_numpy().astype(np.int64)
-                return _InternalFH(arr, FHValueType.INT)
+                return (arr, True, None, False)
             if pd.api.types.is_timedelta64_dtype(values.dtype):
                 arr = values.to_numpy().view(np.int64).copy()
-                return _InternalFH(arr, FHValueType.TIMEDELTA)
+                return (arr, True, None, True)
             raise TypeError(
                 f"pd.Index with dtype {values.dtype} is not supported. "
                 f"Expected integer or timedelta dtype."
@@ -111,7 +146,6 @@ class PandasFHConverter:
         if isinstance(values, list):
             return PandasFHConverter._list_to_internal(values)
 
-        # if no match, the type is not supported
         raise TypeError(
             f"Unsupported type for forecasting horizon values: "
             f"{type(values).__name__}. When passing pandas objects, "
@@ -122,147 +156,279 @@ class PandasFHConverter:
         )
 
     @staticmethod
-    def _list_to_internal(values: list) -> _InternalFH:
-        """Convert list of supported scalar types to _InternalFH."""
+    def _list_to_internal(values: list) -> tuple:
+        """Convert list of supported scalar types to internal tuple."""
         from datetime import timedelta as _timedelta
 
         if len(values) == 0:
             raise ValueError("Forecasting horizon values must not be empty.")
 
-        # pd.Timedelta, np.timedelta64, and stdlib datetime.timedelta are
-        # combined into a single case because they all represent the same
-        # concept and pd.TimedeltaIndex accepts all three.
+        # timedelta types -> TimedeltaIndex path
         _timedelta_types = (pd.Timedelta, np.timedelta64, _timedelta)
         if isinstance(values[0], _timedelta_types):
             PandasFHConverter._check_list_homogeneity(values, _timedelta_types)
             idx = pd.TimedeltaIndex(values)
-            arr = idx.asi8.copy()
-            return _InternalFH(arr, FHValueType.TIMEDELTA)
+            freq_str = PandasFHConverter._freqstr(idx)
+            if freq_str is not None:
+                steps = PandasFHConverter._timedelta_to_steps(idx.asi8.copy(), freq_str)
+                return (steps, True, freq_str, False)
+            else:
+                return (idx.asi8.copy(), True, None, True)
 
-        # period values — extract ordinals via PeriodIndex
+        # period values -> ordinals via PeriodIndex
         if isinstance(values[0], pd.Period):
             PandasFHConverter._check_list_homogeneity(values, pd.Period)
             idx = pd.PeriodIndex(values)
             arr = idx.asi8.copy()
             freq_str = PandasFHConverter._freqstr(idx)
-            return _InternalFH(arr, FHValueType.PERIOD, freq=freq_str)
+            return (arr, False, freq_str, False)
 
-        # timestamp values — extract nanoseconds via DatetimeIndex
+        # timestamp values -> ordinals via DatetimeIndex -> PeriodIndex
         if isinstance(values[0], pd.Timestamp):
             PandasFHConverter._check_list_homogeneity(values, pd.Timestamp)
             idx = pd.DatetimeIndex(values)
-            arr = idx.asi8.copy()
             freq_str = PandasFHConverter._freqstr(idx)
-            tz = str(idx.tz) if idx.tz is not None else None
-            return _InternalFH(arr, FHValueType.DATETIME, freq=freq_str, timezone=tz)
+            if freq_str is None:
+                raise ValueError(
+                    "List of Timestamps without inferrable freq is not "
+                    "supported. Provide freq explicitly via "
+                    "ForecastingHorizon(values, freq=...)."
+                )
+            arr = idx.to_period(freq_str).asi8.copy()
+            return (arr, False, freq_str, False)
 
-        # offset objects — convert to Timedelta first
+        # offset objects -> timedelta path
         if isinstance(values[0], pd.offsets.BaseOffset):
             PandasFHConverter._check_list_homogeneity(values, pd.offsets.BaseOffset)
             tds = [pd.Timedelta(v) for v in values]
             idx = pd.TimedeltaIndex(tds)
-            arr = idx.asi8.copy()
-            return _InternalFH(arr, FHValueType.TIMEDELTA)
+            freq_str = PandasFHConverter._freqstr(idx)
+            if freq_str is not None:
+                steps = PandasFHConverter._timedelta_to_steps(idx.asi8.copy(), freq_str)
+                return (steps, True, freq_str, False)
+            else:
+                return (idx.asi8.copy(), True, None, True)
 
         raise TypeError(
             f"List with element type {type(values[0]).__name__} is not supported."
         )
 
-    # internal representation -> pandas conversion
+    # ---- internal representation -> pandas conversion ----
+
     @staticmethod
     def to_pandas_index(
         values: np.ndarray,
-        value_type: FHValueType,
+        is_relative: bool,
         freq: str | None = None,
-        timezone: str | None = None,
+        values_are_nanos: bool = False,
     ) -> pd.Index:
         """Convert internal values to pandas Index.
+
+        Output type is determined by is_relative and freq:
+        - values_are_nanos=True: TimedeltaIndex (raw nanoseconds)
+        - is_relative=False and freq is not None: PeriodIndex
+        - otherwise: plain integer Index
 
         Parameters
         ----------
         values : np.ndarray
             Int64 numpy array of horizon values.
-        value_type : FHValueType
-            Semantic type of the values.
+        is_relative : bool
+            Whether these are relative steps.
         freq : str or None
-            Frequency string for PERIOD/DATETIME types.
-        timezone : str or None
-            Timezone string for DATETIME type.
+            Frequency string for temporal types.
+        values_are_nanos : bool
+            If True, values are raw nanoseconds -> return TimedeltaIndex.
 
         Returns
         -------
         pd.Index
             Pandas Index matching the semantic type.
         """
-        if value_type == FHValueType.INT:
-            return pd.Index(values.copy(), dtype=int)
-
-        if value_type == FHValueType.PERIOD:
-            # PeriodIndex from ordinals requires a writable copy
-            return pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
-
-        if value_type == FHValueType.DATETIME:
-            dt_arr = values.copy().view("datetime64[ns]")
-            idx = pd.DatetimeIndex(dt_arr)
-            if timezone is not None:
-                idx = idx.tz_localize("UTC").tz_convert(timezone)
-            return idx
-
-        if value_type == FHValueType.TIMEDELTA:
+        if values_are_nanos:
             td_arr = values.copy().view("timedelta64[ns]")
             return pd.TimedeltaIndex(td_arr)
 
-        # control should never reach here due to FHValueType validation
-        raise ValueError(f"Unknown FHValueType: {value_type}")
+        if not is_relative and freq is not None:
+            return pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
 
-    # cutoff conversion
+        return pd.Index(values.copy(), dtype=int)
+
     @staticmethod
-    def cutoff_to_internal(cutoff, freq=None):
-        """Convert cutoff to internal representation.
+    def steps_to_datetime(values, freq, tz=None):
+        """Convert integer step values (period ordinals) to DatetimeIndex.
+
+        Used by to_absolute_index() when the cutoff is a DatetimeIndex,
+        to reconstruct DatetimeIndex output from period ordinals.
+
+        Parameters
+        ----------
+        values : np.ndarray
+            Int64 period ordinals.
+        freq : str
+            Frequency string.
+        tz : str or None
+            Timezone to apply to the output.
+
+        Returns
+        -------
+        pd.DatetimeIndex
+            DatetimeIndex reconstructed from ordinals.
+        """
+        period_idx = pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
+        dt_idx = period_idx.to_timestamp()
+        if tz is not None:
+            dt_idx = dt_idx.tz_localize(tz)
+        return dt_idx
+
+    # ---- cutoff conversion ----
+
+    @staticmethod
+    def cutoff_to_steps(cutoff, freq=None):
+        """Convert cutoff to an integer step value (period ordinal).
 
         Parameters
         ----------
         cutoff : pd.Period, pd.Timestamp, int, pd.Index, or np.integer
             Cutoff value. If pd.Index, the last element is used.
         freq : str or None
-            Frequency hint.
+            Frequency string. Required for pd.Timestamp cutoff.
 
         Returns
         -------
-        tuple of (np.int64, FHValueType, str or None, str or None)
-            (value, value_type, freq, timezone)
+        np.int64
+            Cutoff as integer step (period ordinal for temporal types).
+
+        Raises
+        ------
+        ValueError
+            If cutoff is a Timestamp and freq is not provided.
+        TypeError
+            If cutoff type is not supported.
         """
-        pass
+        # unwrap pd.Index to scalar
+        if isinstance(cutoff, pd.Index):
+            if len(cutoff) == 0:
+                raise ValueError("Cutoff index is empty.")
+            scalar = cutoff[-1]
+            # extract freq from index if not provided
+            if freq is None and hasattr(cutoff, "freq") and cutoff.freq is not None:
+                freq = PandasFHConverter._freqstr(cutoff)
+            return PandasFHConverter.cutoff_to_steps(scalar, freq=freq)
+
+        if isinstance(cutoff, pd.Period):
+            return np.int64(cutoff.ordinal)
+
+        if isinstance(cutoff, pd.Timestamp):
+            if freq is None:
+                raise ValueError(
+                    "freq is required to convert Timestamp cutoff to "
+                    "integer steps. Provide freq on the ForecastingHorizon "
+                    "or use a PeriodIndex cutoff."
+                )
+            period = cutoff.to_period(freq)
+            return np.int64(period.ordinal)
+
+        if isinstance(cutoff, (int, np.integer)):
+            return np.int64(cutoff)
+
+        raise TypeError(
+            f"Unsupported cutoff type: {type(cutoff).__name__}. "
+            f"Expected pd.Period, pd.Timestamp, int, or pd.Index."
+        )
 
     @staticmethod
-    def cutoff_to_pandas(cutoff_internal):
-        pass
+    def cutoff_is_datetime_index(cutoff) -> bool:
+        """Check if cutoff is or wraps a DatetimeIndex/Timestamp.
 
-    @staticmethod
-    def steps_to_nanos(steps: np.ndarray, freq: str, ref_nanos=None) -> np.ndarray:
-        """Convert integer steps to int64 nanosecond offsets.
+        Used by to_absolute_index() to decide output type.
 
         Parameters
         ----------
-        steps : np.ndarray of int64
-            Integer step counts.
+        cutoff : any
+            Cutoff value to check.
+
+        Returns
+        -------
+        bool
+            True if cutoff is DatetimeIndex or Timestamp-based.
+        """
+        if isinstance(cutoff, pd.DatetimeIndex):
+            return True
+        if isinstance(cutoff, pd.Timestamp):
+            return True
+        return False
+
+    @staticmethod
+    def cutoff_tz(cutoff) -> str | None:
+        """Extract timezone from cutoff, if present.
+
+        Parameters
+        ----------
+        cutoff : any
+            Cutoff value.
+
+        Returns
+        -------
+        str or None
+            Timezone string, or None.
+        """
+        if isinstance(cutoff, pd.DatetimeIndex) and cutoff.tz is not None:
+            return str(cutoff.tz)
+        if isinstance(cutoff, pd.Timestamp) and cutoff.tz is not None:
+            return str(cutoff.tz)
+        return None
+
+    @staticmethod
+    def nanos_to_steps(nanos: np.ndarray, freq: str) -> np.ndarray:
+        """Convert nanosecond values to integer steps using freq.
+
+        Used by the freq setter to convert deferred TimedeltaIndex nanos
+        to integer steps when freq becomes available.
+
+        Parameters
+        ----------
+        nanos : np.ndarray of int64
+            Nanosecond values.
         freq : str
-            Frequency string (e.g. "D", "h", "M").
-        ref_nanos : int or np.int64 or None, default=None
-            Reference point as nanoseconds since Unix epoch.
-            Used to correctly compute offsets for variable-length periods
-            (months, years). If None, uses 2000-01-01 as reference.
+            Frequency string (must be a fixed-length frequency like
+            "D", "h", "s", not variable-length like "M", "Y").
 
         Returns
         -------
         np.ndarray of int64
-            Nanosecond offsets corresponding to each step.
+            Integer steps.
+
+        Raises
+        ------
+        ValueError
+            If freq is a variable-length frequency (M, Q, Y) that cannot
+            be converted to a fixed nanosecond count, or if nanos are not
+            evenly divisible by the freq.
         """
-        pass
+        from pandas.tseries.frequencies import to_offset
 
-    # frequency helper functions
+        offset = to_offset(freq)
+        try:
+            freq_nanos = offset.nanos
+        except ValueError:
+            raise ValueError(
+                f"Cannot convert nanosecond timedeltas to steps with "
+                f"non-fixed frequency {freq!r}. Variable-length frequencies "
+                f"like 'M', 'Q', 'Y' do not have a fixed nanosecond count."
+            )
 
-    # final check pending for this function
+        remainder = nanos % freq_nanos
+        if np.any(remainder != 0):
+            raise ValueError(
+                f"Timedelta values are not evenly divisible by frequency "
+                f"{freq!r}. This means the timedeltas do not represent "
+                f"integer multiples of the frequency."
+            )
+        return (nanos // freq_nanos).astype(np.int64)
+
+    # ---- frequency helper functions ----
+
     @staticmethod
     def extract_freq(obj) -> str | None:
         """Extract and normalize a frequency string from a pandas object.
@@ -296,7 +462,6 @@ class PandasFHConverter:
             return PandasFHConverter.normalize_freq(obj.freqstr)
 
         if hasattr(obj, "cutoff"):
-            # sktime forecasters: extract freq from cutoff attribute
             return PandasFHConverter.extract_freq(obj.cutoff)
 
         if isinstance(obj, pd.Period):
@@ -306,7 +471,6 @@ class PandasFHConverter:
             return PandasFHConverter._freqstr(obj)
 
         if isinstance(obj, pd.Index):
-            # generic pd.Index — no freq attribute
             return None
 
         return None
@@ -339,9 +503,6 @@ class PandasFHConverter:
         }
         return alias_map.get(freq_str, freq_str)
 
-    # below function is directly moved from ForecastingHorizon.get_expected_pred_idx()
-    # to avoid pandas imports in ForecastingHorizon
-    # it may contain some parts/checks which might require adjustments after the move
     @staticmethod
     def build_pred_index(fh, y=None, cutoff=None, sort_by_time=False):
         """Construct expected prediction output index.
@@ -384,12 +545,10 @@ class PandasFHConverter:
             y_inst_idx = y_index.droplevel(-1).unique()
 
             def _per_instance_pred(inst_key):
-                """Get absolute FH for a single instance."""
                 inst_cutoff = get_cutoff(y.loc[inst_key])
                 return fh.to_absolute_index(inst_cutoff)
 
             if cutoff is not None:
-                # Global cutoff provided: use global absolute FH for all
                 y_inst_idx = y_inst_idx.sort_values()
                 fh_abs_idx = fh.to_absolute_index(cutoff)
                 if isinstance(y_inst_idx, pd.MultiIndex) and sort_by_time:
@@ -401,7 +560,6 @@ class PandasFHConverter:
                 else:
                     fh_list = [(x, t) for x in y_inst_idx for t in fh_abs_idx]
             else:
-                # Per-instance cutoffs
                 fh_list = []
                 for inst_key in y_inst_idx:
                     inst_abs = _per_instance_pred(inst_key)
@@ -416,7 +574,6 @@ class PandasFHConverter:
                 fh_df = pd.DataFrame(index=fh_idx)
                 fh_idx = fh_df.sort_index(level=-1).index
 
-            # replicate index names
             if y_index.names is not None:
                 fh_idx.names = y_index.names
 
@@ -428,32 +585,44 @@ class PandasFHConverter:
 
         fh_abs_idx = fh.to_absolute_index(cutoff)
 
-        # replicate index names
         if y_index is not None and y_index.names is not None:
             fh_abs_idx.names = y_index.names
 
         return fh_abs_idx
 
-    # private helper functions
+    # ---- private helper functions ----
+
     @staticmethod
-    def _check_list_homogeneity(values, expected_types):
-        """Check all list elements match expected types.
+    def _timedelta_to_steps(nanos: np.ndarray, freq: str) -> np.ndarray:
+        """Convert timedelta nanoseconds to integer steps using freq.
 
         Parameters
         ----------
-        values : list
-            List of values to check. Must be non-empty.
-        expected_types : type or tuple of types
-            Accepted types for isinstance check.
+        nanos : np.ndarray of int64
+            Nanosecond values from TimedeltaIndex.asi8.
+        freq : str
+            Frequency string.
 
-        Raises
-        ------
-        TypeError
-            If any element does not match expected_types.
+        Returns
+        -------
+        np.ndarray of int64
+            Integer step counts.
         """
-        # starting from index 1 since the
-        # check for first element's type against expected_types
-        # is done in the caller before this function is called
+        from pandas.tseries.frequencies import to_offset
+
+        offset = to_offset(freq)
+        try:
+            freq_nanos = offset.nanos
+        except ValueError:
+            raise ValueError(
+                f"Cannot convert timedelta to integer steps with "
+                f"non-fixed frequency {freq!r}."
+            )
+        return (nanos // freq_nanos).astype(np.int64)
+
+    @staticmethod
+    def _check_list_homogeneity(values, expected_types):
+        """Check all list elements match expected types."""
         for i, v in enumerate(values[1:], start=1):
             if not isinstance(v, expected_types):
                 raise TypeError(
