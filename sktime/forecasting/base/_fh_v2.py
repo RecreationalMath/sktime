@@ -3,10 +3,31 @@
 """
 ForecastingHorizon: pandas-agnostic forecasting horizon implementation.
 
-Architecture A: FH stores only {_values, _is_relative, _freq,
+Architecture: ForecastingHorizon stores only {_values, _is_relative, _freq,
 _values_are_nanos}. All temporal inputs are normalized to integer steps
-(period ordinals) at construction. No FHValueType, no _timezone.
+(period ordinals) at construction.
+This means that all internal arithmetic is pure integer math,
+and the only place where pandas logic is needed is in the conversion of inputs to
+this internal representation (PandasFHConverter).
+This design allows ForecastingHorizon to be pandas-free,
+while still supporting all the same input types and frequencies as before.
 All pandas-specific logic is delegated to the _fh_utils module.
+
+Internal state of ForecastingHorizon consists of the following attributes:
+
+``_values``: int64 numpy array — integer steps (period ordinals for
+  absolute, step counts for relative), or raw nanoseconds when
+  ``_values_are_nanos`` is True. Read-only after construction.
+
+``_is_relative``: bool — whether values are relative to training cutoff.
+
+``_freq``: str or None — frequency mnemonic (e.g. ``"M"``, ``"D"``).
+  None for plain integer horizons or when freq has not yet been assigned.
+  The ``freq`` setter is the only deliberate mutation point on the object.
+
+``_values_are_nanos``: bool — True when values are raw nanoseconds
+  pending conversion to integer steps (e.g. freq-less TimedeltaIndex input).
+  Set to False once freq is assigned via the ``freq`` setter.
 """
 
 __all__ = ["ForecastingHorizon"]
@@ -21,11 +42,16 @@ _UNSET = object()
 
 
 class ForecastingHorizon:
-    """Forecasting horizon with pandas-decoupled internals.
+    """Represents the time points to forecast, relative or absolute.
 
-    Internally stores values as a sorted, deduplicated int64 numpy array
-    of integer steps (period ordinals for absolute, step counts for relative),
-    together with minimal metadata (is_relative, freq).
+    A forecasting horizon specifies which future (or past) time points a
+    forecaster should predict. It accepts a wide range of input types:
+    plain integers, pandas PeriodIndex, DatetimeIndex, TimedeltaIndex, etc.
+    and normalizes them internally to a sorted, deduplicated int64 numpy
+    array of integer steps (period ordinals for absolute, step counts for
+    relative). Temporal inputs that cannot be immediately converted to
+    integer steps (e.g. freq-less TimedeltaIndex) are stored as raw
+    nanoseconds and converted when frequency information becomes available.
 
     Parameters
     ----------
@@ -58,11 +84,15 @@ class ForecastingHorizon:
     freq : str, pd.Index, pd.Period, pandas offset, or sktime forecaster,
         optional (default=None)
         Frequency information for the horizon values.
-        When values already carry frequency (e.g., pd.PeriodIndex,
-        pd.DatetimeIndex, or pd.TimedeltaIndex), provided ``freq`` must match
-        the values' frequency, otherwise a ValueError is raised.
-        When values do not carry frequency (e.g. int, list, np.ndarray),
-        ``freq`` is used directly if provided.
+        When values already carry frequency (e.g. ``pd.PeriodIndex``,
+        ``pd.DatetimeIndex`` with freq, or ``pd.TimedeltaIndex`` with freq),
+        provided ``freq`` must match the values' frequency, otherwise a
+        ValueError is raised.
+        When values do not carry frequency (e.g. int, list, np.ndarray,
+        or freq-less ``pd.TimedeltaIndex``), ``freq`` is used directly if
+        provided. For freq-less ``pd.TimedeltaIndex``, values are stored as
+        raw nanoseconds until freq is assigned (via this parameter or later
+        through the ``freq`` setter).
 
     Examples
     --------
@@ -71,7 +101,7 @@ class ForecastingHorizon:
     >>> fh.is_relative
     True
     >>> fh.to_numpy()
-    numpy.ndarray([1, 2, 3])
+    array([1, 2, 3])
     """
 
     __slots__ = ("_values", "_is_relative", "_freq", "_values_are_nanos")
