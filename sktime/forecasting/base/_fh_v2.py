@@ -274,9 +274,8 @@ class ForecastingHorizon:
             New instance.
         """
         obj = object.__new__(cls)
-        assert len(values) == 0 or np.all(np.diff(values) > 0), (
-            "_create expects sorted, unique values"
-        )
+        if len(values) > 0 and not np.all(np.diff(values) > 0):
+            raise ValueError("_create expects sorted, unique values")
         obj._values = values
         obj._values.flags.writeable = False
         obj._is_relative = is_relative
@@ -467,7 +466,7 @@ class ForecastingHorizon:
             self._values, self._is_relative, self._freq, self._values_are_nanos
         )
 
-    def to_numpy(self, **kwargs) -> np.ndarray:
+    def to_numpy(self) -> np.ndarray:
         """Return forecasting horizon values as numpy array.
 
         Returns
