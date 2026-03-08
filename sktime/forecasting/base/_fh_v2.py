@@ -40,7 +40,7 @@ from sktime.forecasting.base._freq_mnemonic import validate_freq
 # sentinel for distinguishing "not provided" from None in clone()
 _UNSET = object()
 
-# types whose is_relative is ambiguous (compatible with both True and False)
+# types whose is_relative is compatible with both True and False
 _RELATIVE_NEUTRAL_TYPES = (int, np.integer, list, range, np.ndarray)
 
 
