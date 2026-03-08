@@ -104,15 +104,13 @@ class ForecastingHorizon:
     array([1, 2, 3])
     """
 
-    __slots__ = ("_values", "_is_relative", "_freq", "_values_are_nanos")
-
     def __init__(
         self,
         values=None,
         is_relative: bool | None = None,
         freq=None,
     ):
-        # --- convert values to internal representation ---
+        # convert values to internal representation
         # canonical path: plain Python/numpy types — no pandas needed
         if isinstance(values, (int, np.integer)):
             self._values = np.array([int(values)], dtype=np.int64)
@@ -126,7 +124,7 @@ class ForecastingHorizon:
             inferred_is_relative = True
         elif isinstance(values, np.ndarray):
             self._init_from_ndarray(values)
-            inferred_is_relative = True  # int and timedelta default to relative
+            inferred_is_relative = True  # int and np.timedelta64 default to relative
         elif (
             isinstance(values, list)
             and len(values) > 0
@@ -160,14 +158,25 @@ class ForecastingHorizon:
             self._freq = None
             self._values_are_nanos = False
 
-        # --- set freq via setter (single gate for validation) ---
+        # set freq via setter (single gate for validation)
         if freq is not None:
             self.freq = freq
 
-        # --- determine is_relative ---
+        # determine is_relative
         if is_relative is not None:
             if not isinstance(is_relative, bool):
                 raise TypeError("`is_relative` must be a boolean or None")
+            if inferred_is_relative is not None and is_relative != inferred_is_relative:
+                # integers are compatible with both relative and absolute,
+                # so only raise when the type strictly implies one interpretation
+                # (e.g. PeriodIndex is always absolute, TimedeltaIndex always relative)
+                if not isinstance(values, (int, np.integer, list, range, np.ndarray)):
+                    raise ValueError(
+                        f"Conflict between inferred is_relative={inferred_is_relative} "
+                        f"and provided is_relative={is_relative}. Please resolve the "
+                        "conflict by providing a consistent `is_relative` value or "
+                        "adjusting the input `values`."
+                    )
             self._is_relative = is_relative
         else:
             self._is_relative = inferred_is_relative
