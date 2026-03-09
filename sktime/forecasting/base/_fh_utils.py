@@ -291,8 +291,16 @@ class PandasFHConverter:
         ----------
         cutoff : pd.Period, pd.Timestamp, int, pd.Index, or np.integer
             Cutoff value. If pd.Index, the last element is used.
+            For ``pd.Period``, if ``freq`` is provided and differs from
+            the Period's own freq, the Period is converted via
+            ``asfreq(freq)`` to produce the correct ordinal.
+            For ``pd.Timestamp`` (including tz-aware), the timestamp is
+            converted to a Period via ``to_period(freq)``. Timezone is
+            handled correctly by pandas.
         freq : str or None
-            Frequency string. Required for pd.Timestamp cutoff.
+            Frequency string. Required for ``pd.Timestamp`` cutoff.
+            Used for ``pd.Period`` cutoff to ensure the ordinal matches
+            the FH's frequency coordinate system.
 
         Returns
         -------
@@ -317,6 +325,9 @@ class PandasFHConverter:
             return PandasFHConverter.cutoff_to_steps(scalar, freq=freq)
 
         if isinstance(cutoff, pd.Period):
+            cutoff_freq = PandasFHConverter.normalize_freq(cutoff.freqstr)
+            if freq is not None and cutoff_freq != freq:
+                cutoff = cutoff.asfreq(freq)
             return np.int64(cutoff.ordinal)
 
         if isinstance(cutoff, pd.Timestamp):
