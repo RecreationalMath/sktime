@@ -361,13 +361,16 @@ class ForecastingHorizon:
 
     # ---- core conversion methods ----
 
-    def to_relative(self, cutoff=None):
+    # breaking change: cutoff is no longer optional
+    def to_relative(self, cutoff):
         """Return relative version of forecasting horizon.
 
         Parameters
         ----------
-        cutoff : pd.Period, pd.Timestamp, int, or pd.Index, optional
-            Cutoff value required for conversion.
+        cutoff : pd.Period, pd.Timestamp, int, or pd.Index
+            Cutoff value is required to convert an absolute forecasting
+            horizon to a relative one.
+            If pd.Index, last/latest value is considered the cutoff
 
         Returns
         -------
