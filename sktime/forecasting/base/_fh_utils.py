@@ -157,7 +157,49 @@ class PandasFHConverter:
 
     @staticmethod
     def _list_to_internal(values: list) -> tuple:
-        """Convert list of supported scalar types to internal tuple."""
+        """Convert list of pandas/temporal scalar types to internal tuple.
+
+        Dispatches on the type of the first element. All elements must be
+        of the same type (enforced via ``_check_list_homogeneity``).
+
+        Supported element types and their conversion:
+
+        - ``pd.Timedelta``, ``np.timedelta64``, ``datetime.timedelta``:
+        Converted to ``pd.TimedeltaIndex``. If freq is inferrable,
+        normalized to integer steps; otherwise stored as nanoseconds
+        with ``values_are_nanos=True``.
+        - ``pd.Period``: Converted to ``pd.PeriodIndex``, ordinals
+        extracted via ``.asi8``. Always absolute.
+        - ``pd.Timestamp``: Converted to ``pd.DatetimeIndex``, then to
+        ``pd.PeriodIndex`` via ``.to_period(freq)``. Freq must be
+        inferrable, otherwise raises. Always absolute.
+        - ``pd.offsets.BaseOffset``: Each offset is converted to
+        ``pd.Timedelta``, then follows the timedelta path.
+
+        Note: ``list[int]`` is not handled here — it is handled by
+        ``ForecastingHorizon._coerce_canonical`` before reaching the
+        converter.
+
+        Parameters
+        ----------
+        values : list
+            Non-empty list of homogeneous pandas/temporal scalars.
+
+        Returns
+        -------
+        tuple of (np.ndarray, bool, str or None, bool)
+            (values, is_relative, freq, values_are_nanos).
+            Same format as ``to_internal``.
+
+        Raises
+        ------
+        ValueError
+            If ``values`` is empty, or if list of Timestamps has no
+            inferrable freq.
+        TypeError
+            If element type is not supported, or if list elements are
+            not homogeneous.
+        """
         from datetime import timedelta as _timedelta
 
         if len(values) == 0:
