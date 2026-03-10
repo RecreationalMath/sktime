@@ -325,27 +325,51 @@ class PandasFHConverter:
     def steps_to_datetime(values, freq, tz=None):
         """Convert integer step values (period ordinals) to DatetimeIndex.
 
-        Used by to_absolute_index() when the cutoff is a DatetimeIndex,
-        to reconstruct DatetimeIndex output from period ordinals.
+        Used by ``to_absolute_index`` when the cutoff is a datetime
+        type, to reconstruct DatetimeIndex output from period ordinals.
+
+        Conversion path: ordinals -> PeriodIndex -> DatetimeIndex via
+        ``to_timestamp()``, which returns the **start** of each period
+        (e.g. ``Period("2020-01", "M")`` -> ``Timestamp("2020-01-01")``).
+
+        If ``tz`` is provided, the tz-naive DatetimeIndex is first
+        localized to UTC (which has no DST transitions), then
+        converted to the target timezone via ``tz_convert``. This
+        avoids ``AmbiguousTimeError`` / ``NonExistentTimeError`` that
+        would occur with direct ``tz_localize`` for DST-aware
+        timezones at DST boundaries. The trade-off is that for
+        timestamps at DST boundaries, the reconstructed UTC offset
+        may differ from the original by up to 1 hour, since the
+        period-ordinal round-trip loses the original offset.
 
         Parameters
         ----------
         values : np.ndarray
             Int64 period ordinals.
         freq : str
-            Frequency string.
+            Frequency string. Must not be None.
         tz : str or None
-            Timezone to apply to the output.
+            Timezone to localize the output DatetimeIndex.
+            None produces a tz-naive DatetimeIndex.
 
         Returns
         -------
         pd.DatetimeIndex
             DatetimeIndex reconstructed from ordinals.
+
+        Raises
+        ------
+        ValueError
+            If ``freq`` is None (from ``PeriodIndex.from_ordinals``).
         """
         period_idx = pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
         dt_idx = period_idx.to_timestamp()
         if tz is not None:
-            dt_idx = dt_idx.tz_localize(tz)
+            # localize to UTC first (no DST ambiguity), then convert
+            # to target tz. Direct tz_localize(tz) would raise
+            # AmbiguousTimeError/NonExistentTimeError for timestamps
+            # at DST boundaries in DST-aware timezones.
+            dt_idx = dt_idx.tz_localize("UTC").tz_convert(tz)
         return dt_idx
 
     # ---- cutoff conversion ----
@@ -416,20 +440,23 @@ class PandasFHConverter:
         )
 
     @staticmethod
-    def cutoff_is_datetime_index(cutoff) -> bool:
-        """Check if cutoff is or wraps a DatetimeIndex/Timestamp.
+    def cutoff_is_dti_ts(cutoff) -> bool:
+        """Check if cutoff is a datetime-based type.
 
-        Used by to_absolute_index() to decide output type.
+        Returns True for ``pd.DatetimeIndex`` and ``pd.Timestamp``.
+        Used by ``to_absolute_index`` to decide whether to produce
+        DatetimeIndex output.
 
         Parameters
         ----------
-        cutoff : any
+        cutoff : pd.DatetimeIndex, pd.Timestamp, or other
             Cutoff value to check.
 
         Returns
         -------
         bool
-            True if cutoff is DatetimeIndex or Timestamp-based.
+            True if cutoff is ``pd.DatetimeIndex`` or
+            ``pd.Timestamp``, False otherwise.
         """
         if isinstance(cutoff, pd.DatetimeIndex):
             return True
@@ -441,15 +468,21 @@ class PandasFHConverter:
     def cutoff_tz(cutoff) -> str | None:
         """Extract timezone from cutoff, if present.
 
+        Checks ``pd.DatetimeIndex`` and ``pd.Timestamp`` for a ``.tz``
+        attribute. All other types return None.
+
         Parameters
         ----------
-        cutoff : any
-            Cutoff value.
+        cutoff : pd.DatetimeIndex, pd.Timestamp, or other
+            Cutoff value. Only ``pd.DatetimeIndex`` and
+            ``pd.Timestamp`` with a non-None ``.tz`` will return a
+            timezone string.  All other types return None.
 
         Returns
         -------
         str or None
-            Timezone string, or None.
+            Timezone string (e.g. ``"UTC"``, ``"US/Eastern"``), or
+            None if cutoff has no timezone or is not a datetime type.
         """
         if isinstance(cutoff, pd.DatetimeIndex) and cutoff.tz is not None:
             return str(cutoff.tz)

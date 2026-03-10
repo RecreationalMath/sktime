@@ -435,6 +435,11 @@ class ForecastingHorizon:
                 self._values_are_nanos,
             )
 
+        if cutoff is None:
+            raise ValueError(
+                "`cutoff` must be provided to convert relative FH to absolute."
+            )
+
         if self._values_are_nanos:
             # attempt to extract freq from cutoff for deferred conversion
             cutoff_freq = PandasFHConverter.extract_freq(cutoff)
@@ -503,24 +508,29 @@ class ForecastingHorizon:
     def to_absolute_index(self, cutoff=None):
         """Return absolute values as pandas Index.
 
-        Output type is cutoff-driven:
-        - DatetimeIndex cutoff -> DatetimeIndex output (with tz from cutoff)
-        - PeriodIndex/int cutoff -> PeriodIndex output (via to_pandas())
+        Output type is determined by the cutoff type:
+
+        - ``pd.DatetimeIndex`` or ``pd.Timestamp`` cutoff: returns
+        ``pd.DatetimeIndex``, with timezone from cutoff if present.
+        - ``pd.PeriodIndex``, ``pd.Period``, or int cutoff: returns
+        ``pd.PeriodIndex`` (if freq is set) or integer ``pd.Index``.
 
         Parameters
         ----------
-        cutoff : pd.Period, pd.Timestamp, int, or pd.Index, optional
-            Cutoff value for conversion.
+        cutoff : pd.Period, pd.Timestamp, int, or pd.Index
+            Cutoff value for conversion. Required for relative FH.
+            If the FH is already absolute, cutoff is only used to
+            determine the output Index type.
 
         Returns
         -------
-        pd.Index
+        pd.DatetimeIndex, pd.PeriodIndex, or pd.Index
             Absolute forecasting horizon as pandas Index.
         """
         abs_fh = self.to_absolute(cutoff)
 
-        # if cutoff is DatetimeIndex, produce DatetimeIndex output
-        if cutoff is not None and PandasFHConverter.cutoff_is_datetime_index(cutoff):
+        # if cutoff is DatetimeIndex or Timestamp, produce DatetimeIndex output
+        if cutoff is not None and PandasFHConverter.cutoff_is_dti_ts(cutoff):
             tz = PandasFHConverter.cutoff_tz(cutoff)
             return PandasFHConverter.steps_to_datetime(
                 abs_fh._values, abs_fh._freq, tz=tz
