@@ -264,28 +264,53 @@ class PandasFHConverter:
         freq: str | None = None,
         values_are_nanos: bool = False,
     ) -> pd.Index:
-        """Convert internal values to pandas Index.
+        """Convert internal FH state to a pandas Index.
 
-        Output type is determined by is_relative and freq:
-        - values_are_nanos=True: TimedeltaIndex (raw nanoseconds)
-        - is_relative=False and freq is not None: PeriodIndex
-        - otherwise: plain integer Index
+        Reconstructs a pandas Index from the four internal attributes
+        of a ForecastingHorizon. The output type depends on the state:
+
+        - ``values_are_nanos=True``: returns ``pd.TimedeltaIndex``.
+        Values are raw nanoseconds from a freq-less TimedeltaIndex
+        that hasn't been converted to integer steps yet.
+        - ``is_relative=False`` and ``freq is not None``: returns
+        ``pd.PeriodIndex``. Values are period ordinals, and freq is
+        needed to reconstruct the periods.
+        - All other cases: returns plain ``pd.Index`` with integer
+        dtype. This covers relative integer FH (with or without
+        freq), and absolute integer FH without freq.
+
+        Note: relative FH that originated from a TimedeltaIndex (with
+        freq) is normalized to integer steps at construction and will
+        be returned as plain integer Index, not TimedeltaIndex. The
+        original input type is not preserved. This is by design —
+        output type reconstruction for prediction indices is handled
+        by ``to_absolute_index`` using cutoff context.
 
         Parameters
         ----------
         values : np.ndarray
-            Int64 numpy array of horizon values.
+            Int64 numpy array of horizon values. Contains period
+            ordinals (absolute with freq), raw nanoseconds
+            (values_are_nanos), or integer step counts (all other).
         is_relative : bool
-            Whether these are relative steps.
+            Whether values are relative to a training cutoff. Only
+            affects output type when ``freq`` is also set: absolute
+            with freq produces PeriodIndex, relative with freq
+            produces integer Index.
         freq : str or None
-            Frequency string for temporal types.
+            Frequency string (e.g. ``"M"``, ``"D"``). Required to
+            reconstruct PeriodIndex for absolute values. Ignored for
+            relative values and nanos.
         values_are_nanos : bool
-            If True, values are raw nanoseconds -> return TimedeltaIndex.
+            If True, values are raw nanoseconds pending freq
+            assignment. Takes precedence over all other parameters
+            for determining output type. Should only be True when
+            ``freq`` is None.
 
         Returns
         -------
-        pd.Index
-            Pandas Index matching the semantic type.
+        pd.TimedeltaIndex, pd.PeriodIndex, or pd.Index
+            Pandas Index matching the semantic state of the FH.
         """
         if values_are_nanos:
             td_arr = values.copy().view("timedelta64[ns]")
