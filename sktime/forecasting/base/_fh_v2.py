@@ -405,7 +405,20 @@ class ForecastingHorizon:
             )
 
         cutoff_step = PandasFHConverter.cutoff_to_steps(cutoff, freq=self._freq)
-        relative_vals = self._values - cutoff_step
+        ordinal_diffs = self._values - cutoff_step
+
+        mult = PandasFHConverter.freq_multiplier(self._freq)
+        if mult != 1:
+            remainder = ordinal_diffs % mult
+            if np.any(remainder != 0):
+                raise ValueError(
+                    f"FH values and cutoff are not on the same period grid "
+                    f"for freq={self._freq!r}. Ordinal differences are not "
+                    f"evenly divisible by the frequency multiplier {mult}."
+                )
+            relative_vals = ordinal_diffs // mult
+        else:
+            relative_vals = ordinal_diffs
 
         return self._create(
             values=relative_vals.astype(np.int64),
@@ -457,7 +470,8 @@ class ForecastingHorizon:
             freq = self._freq
 
         cutoff_step = PandasFHConverter.cutoff_to_steps(cutoff, freq=freq)
-        absolute_vals = cutoff_step + values
+        mult = PandasFHConverter.freq_multiplier(freq)
+        absolute_vals = cutoff_step + values * mult
 
         return self._create(
             values=absolute_vals.astype(np.int64),
@@ -545,8 +559,10 @@ class ForecastingHorizon:
         ----------
         start : pd.Period, pd.Timestamp, int
             Start value returned as zero.
-        cutoff : pd.Period, pd.Timestamp, int, or pd.Index, optional
-            Cutoff value for conversion.
+        cutoff : pd.Period, pd.Timestamp, int, or pd.Index
+            Cutoff value required to convert a relative forecasting
+            horizon to an absolute one.
+            If pd.Index, last/latest value is considered the cutoff
 
         Returns
         -------
@@ -554,13 +570,38 @@ class ForecastingHorizon:
             Absolute representation as zero-based integer index.
         """
         absolute = self.to_absolute(cutoff)
-        start_step = PandasFHConverter.cutoff_to_steps(start, freq=self._freq)
-        integers = absolute._values - start_step
+        freq = absolute._freq
+
+        # safeguard: if self already has freq, it must match absolute's freq.
+        # They can only differ if to_absolute introduced a new freq (bug).
+        # self._freq is None is fine — means freq came from cutoff via nanos path.
+        if self._freq is not None and self._freq != freq:
+            raise ValueError(
+                f"Frequency mismatch after to_absolute: "
+                f"self._freq={self._freq!r}, absolute._freq={freq!r}. "
+                f"This should not happen — please report as a bug."
+            )
+
+        start_step = PandasFHConverter.cutoff_to_steps(start, freq=freq)
+        ordinal_diffs = absolute._values - start_step
+
+        mult = PandasFHConverter.freq_multiplier(freq)
+        if mult != 1:
+            remainder = ordinal_diffs % mult
+            if np.any(remainder != 0):
+                raise ValueError(
+                    f"Start value and FH values are not on the same period "
+                    f"grid for freq={freq!r}. Ordinal differences are not "
+                    f"evenly divisible by the frequency multiplier {mult}."
+                )
+            integers = ordinal_diffs // mult
+        else:
+            integers = ordinal_diffs
 
         return self._create(
             values=integers.astype(np.int64),
             is_relative=False,
-            freq=self._freq,
+            freq=freq,
         )
 
     # ---- in-sample and out-of-sample methods ----
@@ -690,8 +731,12 @@ class ForecastingHorizon:
             # for nanos, check uniform spacing
             diffs = np.diff(self._values)
             return bool(np.all(diffs == diffs[0]))
-        # integer steps: contiguous means every int between min and max present
-        expected_len = int(self._values[-1] - self._values[0]) + 1
+        # for absolute FH with multi-step freq, ordinals have diffs of mult
+        if not self._is_relative and self._freq is not None:
+            mult = PandasFHConverter.freq_multiplier(self._freq)
+        else:
+            mult = 1
+        expected_len = int(self._values[-1] - self._values[0]) // mult + 1
         return len(self._values) == expected_len
 
     def get_expected_pred_idx(self, y=None, cutoff=None, sort_by_time=False):
@@ -731,7 +776,11 @@ class ForecastingHorizon:
 
     def __add__(self, other):
         scalar = self._check_scalar(other)
-        result = self._values + scalar
+        if not self._is_relative and self._freq is not None:
+            mult = PandasFHConverter.freq_multiplier(self._freq)
+            result = self._values + scalar * mult
+        else:
+            result = self._values + scalar
         return self._create(
             result, self._is_relative, self._freq, self._values_are_nanos
         )
@@ -741,12 +790,21 @@ class ForecastingHorizon:
 
     def __sub__(self, other):
         scalar = self._check_scalar(other)
-        result = self._values - scalar
+        if not self._is_relative and self._freq is not None:
+            mult = PandasFHConverter.freq_multiplier(self._freq)
+            result = self._values - scalar * mult
+        else:
+            result = self._values - scalar
         return self._create(
             result, self._is_relative, self._freq, self._values_are_nanos
         )
 
     def __rsub__(self, other):
+        if not self._is_relative and self._freq is not None:
+            raise TypeError(
+                "Reverse subtraction (scalar - fh) is not supported for "
+                "absolute ForecastingHorizon with frequency."
+            )
         scalar = np.int64(other)
         # reverses order, so re-sort via np.unique
         result = np.unique(scalar - self._values)
@@ -755,6 +813,11 @@ class ForecastingHorizon:
         )
 
     def __mul__(self, other):
+        if not self._is_relative and self._freq is not None:
+            raise TypeError(
+                "Multiplication is not supported for absolute "
+                "ForecastingHorizon with frequency."
+            )
         scalar = self._check_scalar(other)
         result = self._values * scalar
         # negative scalar reverses order
