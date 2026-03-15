@@ -61,9 +61,10 @@ class ForecastingHorizon:
         Supported types without pandas dependency:
 
         - ``int`` or ``np.integer``: single integer, coerced to ``range(1, values + 1)``
-        - ``list[int]`` : list of integer steps
-        - ``np.ndarray`` : integer or timedelta64 array
-        - ``range`` : Python range object
+        - ``list[int]``: list of integer steps
+        - ``np.ndarray``: integer or timedelta64 array
+        - ``range``: Python range object
+
         Supported pandas types (delegated to PandasFHConverter):
 
         - ``pd.PeriodIndex``, ``pd.DatetimeIndex``, ``pd.TimedeltaIndex``
