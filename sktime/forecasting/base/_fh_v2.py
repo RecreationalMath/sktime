@@ -59,24 +59,29 @@ class ForecastingHorizon:
         pd.offsets.BaseOffset
         Values of forecasting horizon.
         Supported types without pandas dependency:
-        - ``int`` or ``np.integer`` : single integer step
+
+        - ``int`` or ``np.integer``: single integer, coerced to ``range(1, values + 1)``
         - ``list[int]`` : list of integer steps
         - ``np.ndarray`` : integer or timedelta64 array
         - ``range`` : Python range object
         Supported pandas types (delegated to PandasFHConverter):
+
         - ``pd.PeriodIndex``, ``pd.DatetimeIndex``, ``pd.TimedeltaIndex``
         - ``pd.RangeIndex``, ``pd.Index`` (integer or timedelta dtype)
         - ``pd.Timedelta``, ``pd.offsets.BaseOffset``
         - ``list[pd.Period]``, ``list[pd.Timestamp]``, ``list[pd.Timedelta]``
         - ``list[pd.offsets.BaseOffset]``, ``list[np.timedelta64]``
+
     is_relative : bool, optional (default=None)
         Whether the forecasting horizon is relative to the training cutoff.
         If True, values are relative to end of training series.
         If False, values are absolute.
         If None, inferred from value type:
+
         - int values default to relative (is_relative=True)
         - timedelta values are always relative
         - Period and Timestamp values are always absolute
+
         Note: integer values are compatible with both relative and absolute
         interpretations. For integers, pass ``is_relative=False`` explicitly
         if absolute is intended, as the default inference interprets it as
@@ -110,8 +115,29 @@ class ForecastingHorizon:
         is_relative: bool | None = None,
         freq=None,
     ):
-        # convert values to internal representation
-        # both paths return (values, is_relative, freq, values_are_nanos)
+        # copy-constructor: if values is already an FH, use _create directly
+        if isinstance(values, ForecastingHorizon):
+            src = values
+            copy = self._create(
+                src._values.copy(),
+                src._is_relative,
+                src._freq,
+                src._values_are_nanos,
+            )
+            self._values = copy._values
+            self._is_relative = copy._is_relative
+            self._freq = copy._freq
+            self._values_are_nanos = copy._values_are_nanos
+            # apply overrides if provided
+            if freq is not None:
+                self.freq = freq  # setter validates mismatch
+            if is_relative is not None:
+                self._is_relative = self._resolve_is_relative(
+                    is_relative, src._is_relative, values
+                )
+            return
+
+        # canonical path: plain Python/numpy types — no pandas needed
         if isinstance(values, (int, np.integer, range, np.ndarray)) or (
             isinstance(values, list)
             and len(values) > 0
@@ -120,6 +146,7 @@ class ForecastingHorizon:
             vals, inferred_is_relative, freq_val, nanos_flag = self._coerce_canonical(
                 values
             )
+        # coerced path: pandas types and non-int lists — delegate to converter
         else:
             vals, inferred_is_relative, freq_val, nanos_flag = (
                 PandasFHConverter.to_internal(values)
@@ -127,17 +154,22 @@ class ForecastingHorizon:
 
         # sort, deduplicate, and store
         self._values = np.unique(vals)
-        self._freq = freq_val
         self._values_are_nanos = nanos_flag
 
         # handle empty arrays
         if len(self._values) == 0:
-            self._freq = None
+            freq_val = None
             self._values_are_nanos = False
 
-        # set freq via setter (single gate for validation)
-        if freq is not None:
-            self.freq = freq
+        # set freq via setter (single gate for validation and nanos conversion)
+        self._freq = None
+        if freq_val is not None and freq is not None and freq_val != freq:
+            raise ValueError(
+                f"Frequencies do not match: inferred={freq_val!r}, provided={freq!r}"
+            )
+        effective_freq = freq if freq is not None else freq_val
+        if effective_freq is not None:
+            self.freq = effective_freq
 
         self._is_relative = self._resolve_is_relative(
             is_relative, inferred_is_relative, values
@@ -168,7 +200,8 @@ class ForecastingHorizon:
         values_are_nanos = False
 
         if isinstance(values, (int, np.integer)):
-            arr = np.array([int(values)], dtype=np.int64)
+            n = int(values)
+            arr = np.arange(1, n + 1, dtype=np.int64)
             return arr, inferred_is_relative, freq, values_are_nanos
 
         if isinstance(values, range):
@@ -601,7 +634,7 @@ class ForecastingHorizon:
         return self._create(
             values=integers.astype(np.int64),
             is_relative=False,
-            freq=freq,
+            freq=None,  # integer indices, not period ordinals
         )
 
     # ---- in-sample and out-of-sample methods ----
@@ -819,10 +852,7 @@ class ForecastingHorizon:
                 "ForecastingHorizon with frequency."
             )
         scalar = self._check_scalar(other)
-        result = self._values * scalar
-        # negative scalar reverses order
-        if scalar < 0:
-            result = np.unique(result)
+        result = np.unique(self._values * scalar)
         return self._create(
             result, self._is_relative, self._freq, self._values_are_nanos
         )
