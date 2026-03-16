@@ -14,12 +14,14 @@ Architecture A: All temporal inputs are normalized to integer steps
 - Converting cutoff values to integer steps
 """
 
-___all__ = ["PandasFHConverter"]
+___all__ = ["PandasFHConverter", "_PANDAS_FH_INPUT_TYPES"]
 
 import warnings
 
 import numpy as np
 import pandas as pd
+
+_PANDAS_FH_INPUT_TYPES = pd.Index
 
 from sktime.forecasting.base._freq_mnemonic import (
     _ALIAS_TO_CANONICAL_STATIC,
@@ -202,13 +204,14 @@ class PandasFHConverter:
     # ---- input -> internal representation conversion ----
 
     @staticmethod
-    def to_internal(values) -> tuple:
+    def to_internal(values, freq=None) -> tuple:
         """Convert pandas input values to internal representation.
 
         All temporal inputs are normalized to integer steps:
         - PeriodIndex: .asi8 gives period ordinals (already integer steps)
         - DatetimeIndex with freq: .to_period(freq).asi8 gives ordinals
-        - DatetimeIndex without freq: raises ValueError (freq required)
+        - DatetimeIndex without freq: uses ``freq`` fallback if provided,
+          otherwise raises ValueError
         - TimedeltaIndex with freq: timedelta / freq_timedelta gives steps
         - TimedeltaIndex without freq: stores nanoseconds with
           values_are_nanos=True (deferred conversion)
@@ -222,6 +225,9 @@ class PandasFHConverter:
         ----------
         values : pandas type or list of pandas scalars
             Forecasting horizon values in a pandas-specific format.
+        freq : str, pd.Period, pd.Index, or None, default=None
+            Optional fallback frequency. Used when ``values`` is a
+            DatetimeIndex without freq. Extracted via ``extract_freq``.
 
         Returns
         -------
@@ -233,7 +239,7 @@ class PandasFHConverter:
         TypeError
             If ``values`` type is not supported.
         ValueError
-            If DatetimeIndex is provided without freq.
+            If DatetimeIndex is provided without freq and no fallback.
         """
         # pandas Timedelta scalar
         if isinstance(values, pd.Timedelta):
@@ -269,6 +275,8 @@ class PandasFHConverter:
         # DatetimeIndex -> convert to period ordinals
         if isinstance(values, pd.DatetimeIndex):
             freq_str = PandasFHConverter._freqstr(values)
+            if freq_str is None and freq is not None:
+                freq_str = PandasFHConverter.extract_freq(freq)
             if freq_str is None:
                 raise ValueError(
                     "DatetimeIndex without freq is not supported. "
@@ -963,3 +971,28 @@ class PandasFHConverter:
         if hasattr(idx, "freq") and idx.freq is not None:
             return PandasFHConverter.normalize_freq(idx.freqstr)
         return None
+
+
+def _check_cutoff(cutoff, index):
+    """Check if the cutoff is valid based on time index of forecasting horizon."""
+    if cutoff is None:
+        raise ValueError("`cutoff` must be given, but found none.")
+    if isinstance(index, pd.PeriodIndex):
+        assert isinstance(cutoff, (pd.Period, pd.PeriodIndex))
+        assert index.freqstr == cutoff.freqstr
+    if isinstance(index, pd.DatetimeIndex):
+        assert isinstance(cutoff, (pd.Timestamp, pd.DatetimeIndex))
+
+
+def _index_range(relative, cutoff):
+    """Return Index Range relative to cutoff."""
+    _check_cutoff(cutoff, relative)
+    is_timestamp = isinstance(cutoff, pd.DatetimeIndex)
+    if is_timestamp:
+        cutoff = cutoff.to_period(cutoff.freqstr)
+    if isinstance(cutoff, pd.Index):
+        cutoff = cutoff[[0] * len(relative)]
+    absolute = cutoff + relative
+    if is_timestamp:
+        absolute = absolute.to_timestamp(cutoff.freqstr)
+    return absolute

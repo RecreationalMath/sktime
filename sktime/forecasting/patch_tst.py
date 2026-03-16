@@ -481,8 +481,8 @@ class PatchTSTForecaster(_BaseGlobalForecaster):
 
             idx = (
                 ForecastingHorizon(range(1, pred.shape[1] + 1), freq=self.fh.freq)
-                .to_absolute(self._cutoff)
-                ._values.tolist()
+                .to_absolute_index(self._cutoff)
+                .tolist()
                 * pred.shape[0]
             )
             index = pd.MultiIndex.from_arrays(
@@ -490,10 +490,8 @@ class PatchTSTForecaster(_BaseGlobalForecaster):
                 names=y.index.names,
             )
         else:
-            index = (
-                ForecastingHorizon(range(1, pred.shape[1] + 1))
-                .to_absolute(self._cutoff)
-                ._values
+            index = ForecastingHorizon(range(1, pred.shape[1] + 1)).to_absolute_index(
+                self._cutoff
             )
 
         df_pred = pd.DataFrame(

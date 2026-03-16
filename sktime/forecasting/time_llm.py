@@ -234,7 +234,7 @@ class TimeLLMForecaster(BaseForecaster):
             X_tensor, x_mark_enc=None, x_mark_dec=None, x_dec=None
         )
 
-        forecast_index = fh.to_absolute(self.cutoff).to_pandas()
+        forecast_index = fh.to_absolute_index(self.cutoff)
 
         y_pred = pd.DataFrame(
             data=res.detach().cpu().numpy().flatten(),

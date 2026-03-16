@@ -169,6 +169,7 @@ def _make_fh(cutoff, steps, fh_type, is_relative):
 
     else:
         kwargs = {}
+        fh_freq = None
 
         if fh_type in ["datetime", "period"]:
             cutoff_freq = cutoff.freq
@@ -177,9 +178,10 @@ def _make_fh(cutoff, steps, fh_type, is_relative):
 
         if fh_type == "datetime":
             steps *= cutoff_freq
+            fh_freq = cutoff_freq
 
         if fh_type == "period":
             kwargs = {"freq": cutoff_freq}
 
         values = cutoff + steps
-        return ForecastingHorizon(fh_class(values, **kwargs), is_relative)
+        return ForecastingHorizon(fh_class(values, **kwargs), is_relative, freq=fh_freq)

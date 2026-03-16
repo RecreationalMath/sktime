@@ -239,7 +239,7 @@ class TiRexForecaster(BaseForecaster):
 
         yhat = forecast.reshape(-1)[: len(fh)]
 
-        index = fh.to_absolute(self.cutoff).to_pandas()
+        index = fh.to_absolute_index(self.cutoff)
 
         return pd.Series(
             yhat, index=index, name=(y.name if hasattr(y, "name") else None)

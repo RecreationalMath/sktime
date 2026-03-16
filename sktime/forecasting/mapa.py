@@ -556,7 +556,7 @@ class MAPAForecaster(BaseForecaster):
 
         result = pd.DataFrame(
             final_forecast.reshape(-1, len(self._y_cols)),
-            index=fh.to_absolute(self.cutoff).to_pandas(),
+            index=fh.to_absolute_index(self.cutoff),
             columns=self._y_cols,
         )
 

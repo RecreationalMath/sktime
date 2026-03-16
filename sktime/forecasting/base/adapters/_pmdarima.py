@@ -90,7 +90,7 @@ class _PmdArimaAdapter(BaseForecaster):
         y_pred : pandas.Series
             Returns series of predicted values.
         """
-        fh_abs = fh.to_absolute(self.cutoff).to_pandas()
+        fh_abs = fh.to_absolute_index(self.cutoff)
         fh_abs_int = fh.to_absolute_int(fh_abs[0], self.cutoff).to_pandas()
         end_int = fh_abs_int[-1] + 2
         # +2 because + 1 for "end" (python index), +1 for starting to count at 1 in fh
