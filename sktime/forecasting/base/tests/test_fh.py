@@ -283,9 +283,9 @@ DUPLICATE_INPUT_ARGS = (np.array([1, 2, 2]), [3, 3, 1])
 )
 @pytest.mark.parametrize("arg", DUPLICATE_INPUT_ARGS)
 def test_check_fh_values_duplicate_input_values(arg):
-    """Test that ForecastingHorizon deduplicates input values."""
-    fh = ForecastingHorizon(arg)
-    assert len(fh) == len(np.unique(arg))
+    """Negative test for ForecastingHorizon input arguments."""
+    with raises(ValueError):
+        ForecastingHorizon(arg)
 
 
 @pytest.mark.skipif(

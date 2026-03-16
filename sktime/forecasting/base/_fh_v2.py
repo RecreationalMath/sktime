@@ -167,8 +167,14 @@ class ForecastingHorizon:
                 PandasFHConverter.to_internal(values, freq=freq)
             )
 
-        # sort, deduplicate, and store
-        self._values = np.unique(vals)
+        # sort and store; reject duplicates (matches old FH behaviour)
+        sorted_vals = np.sort(vals)
+        if len(sorted_vals) > 1 and np.any(sorted_vals[1:] == sorted_vals[:-1]):
+            raise ValueError(
+                "Forecasting horizon values must be unique. "
+                f"Found duplicates in: {vals!r}"
+            )
+        self._values = sorted_vals
         self._values_are_nanos = nanos_flag
 
         # handle empty arrays
