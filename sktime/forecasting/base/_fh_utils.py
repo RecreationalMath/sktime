@@ -911,7 +911,6 @@ class PandasFHConverter:
     # ---- private helper functions ----
 
     @staticmethod
-    @staticmethod
     def _check_list_homogeneity(values, expected_types):
         """Check all list elements match expected types."""
         for i, v in enumerate(values[1:], start=1):
