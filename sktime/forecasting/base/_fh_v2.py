@@ -533,6 +533,13 @@ class ForecastingHorizon:
             freq = self._freq
             if freq is None:
                 freq = PandasFHConverter.extract_freq(cutoff)
+            else:
+                cutoff_freq = PandasFHConverter.extract_freq(cutoff)
+                if cutoff_freq is not None and cutoff_freq != freq:
+                    raise ValueError(
+                        f"Frequency mismatch: FH has freq={freq!r} but "
+                        f"cutoff has freq={cutoff_freq!r}."
+                    )
 
         cutoff_step = PandasFHConverter.cutoff_to_steps(cutoff, freq=freq)
         mult = PandasFHConverter.freq_multiplier(freq)
