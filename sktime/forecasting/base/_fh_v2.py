@@ -296,13 +296,9 @@ class ForecastingHorizon:
             raise TypeError("`is_relative` must be a boolean or None")
 
         if inferred_is_relative is not None and is_relative != inferred_is_relative:
-            if isinstance(values, ForecastingHorizon):
-                pass  # FH copy-constructor: accept any is_relative override
-            elif not isinstance(values, _RELATIVE_NEUTRAL_TYPES):
+            if not isinstance(values, _RELATIVE_NEUTRAL_TYPES):
                 # also allow pd.Index with integer dtype
-                import pandas as pd
-
-                if isinstance(values, pd.Index) and np.issubdtype(
+                if isinstance(values, _PANDAS_FH_INPUT_TYPES) and np.issubdtype(
                     values.dtype, np.integer
                 ):
                     return is_relative
