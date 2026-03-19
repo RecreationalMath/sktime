@@ -1077,11 +1077,19 @@ def test_pandas22_freq_roundtrip(ts):
     fh = ForecastingHorizon([0], is_relative=True)
     fh.to_absolute(f.cutoff)
     fh.to_absolute(f.cutoff).to_relative(f.cutoff)
+    # to_absolute_index exercises the pandas freq path (PeriodIndex.to_timestamp)
+    # which is where the original bug #6572 crash occurred
+    fh.to_absolute_index(f.cutoff)
 
 
 def test_timestamp_format_to_absolute():
+    """Test sub-period offset preservation in to_absolute_index.
+
+    Failure case in bug #5186.
+    """
     cutoff = pd.Timestamp("2025-03-02 12:00:00")
     fh = ForecastingHorizon([1, 2, 3], freq="D")
     y_pred_idx = fh.to_absolute_index(cutoff)
     assert isinstance(y_pred_idx, pd.DatetimeIndex)
     assert len(y_pred_idx) == 3
+    assert "12:00:00" in str(y_pred_idx)
