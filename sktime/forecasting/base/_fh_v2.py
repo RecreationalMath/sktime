@@ -1024,6 +1024,7 @@ class ForecastingHorizon:
     # Move element-wise comparison to a separate method
     # and keep __eq__ consistent with __hash__.
     # Need to consider this in th context of forecasting horizon usage.
+    # dummy
     # </check>
     def __hash__(self):
         return hash(
