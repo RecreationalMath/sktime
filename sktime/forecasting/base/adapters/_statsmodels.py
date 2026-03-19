@@ -115,7 +115,10 @@ class _StatsModelsAdapter(BaseForecaster):
         """
         # statsmodels requires zero-based indexing starting at the
         # beginning of the training series when passing integers
-        abs_int = fh.to_absolute_int(self._y_first_index, self.cutoff)._values
+
+        # start, end = fh.to_absolute_int(self._y_first_index, self.cutoff)[[0, -1]]
+        # fh_int = fh.to_absolute_int(self._y_first_index, self.cutoff) - self._y_len
+        abs_int = fh.to_absolute_int(self._y_first_index, self.cutoff).to_numpy()
         start, end = abs_int[[0, -1]]
         fh_int = abs_int - self._y_len
 
@@ -208,7 +211,7 @@ class _StatsModelsAdapter(BaseForecaster):
         if not implements_interval_adapter and implements_quantiles:
             return BaseForecaster._predict_interval(self, fh, X=X, coverage=coverage)
 
-        abs_int = fh.to_absolute_int(self._y_first_index, self.cutoff)._values
+        abs_int = fh.to_absolute_int(self._y_first_index, self.cutoff).to_numpy()
         start, end = abs_int[[0, -1]]
         fh_int = abs_int - self._y_len
         # if fh > 1 steps ahead of cutoff

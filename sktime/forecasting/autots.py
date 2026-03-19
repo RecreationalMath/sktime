@@ -643,7 +643,7 @@ class AutoTS(BaseForecaster):
         return fh_length
 
     def _fh_cutoff_transformation(self, cutoff):
-        if self._fh._freq is not None:
+        if self._fh.freq is not None:
             # temporal FH (was PeriodIndex or DatetimeIndex) — use period cutoff
             transformed_fh_cutoff = cutoff.index.to_period()[-1]
         else:
