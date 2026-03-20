@@ -124,6 +124,8 @@ class ExpandingCutoffSplitter(BaseSplitter):
         """
         if fh is None:
             fh = self._fh
+        # Resolve deferred nanos before any fh arithmetic.
+        fh.freq = y
         for cutoff in self.get_cutoffs(y):
             train_window = np.arange(0, cutoff + 1, step=1)
             test_window = cutoff + fh
@@ -183,6 +185,8 @@ class ExpandingCutoffSplitter(BaseSplitter):
             )
         y = self._validate_y(y)
         fh = self._fh
+        # Resolve deferred nanos before any fh arithmetic.
+        fh.freq = y
         step_length = check_step_length(self.step_length)
         cutoff_index = self._get_first_cutoff_index(y)
         cutoffs = np.array([cutoff_index])

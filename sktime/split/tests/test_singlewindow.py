@@ -39,6 +39,9 @@ def test_single_window_splitter(y, fh, window_length):
             duration=window_length, freq="D"
         )
         checked_fh = check_fh(fh)
+        # Resolve deferred nanos so array_is_int reflects true integer steps.
+        if hasattr(y, "index"):
+            checked_fh.freq = y.index
         assert test_window.shape[0] == len(checked_fh)
 
         if array_is_int(checked_fh):
@@ -69,6 +72,9 @@ def test_single_window_splitter_default_window_length(y, fh):
 
     assert n_splits == 1
     checked_fh = check_fh(fh)
+    # Resolve deferred nanos so array_is_int reflects true integer steps.
+    if hasattr(y, "index"):
+        checked_fh.freq = y.index
     assert test_window.shape[0] == len(checked_fh)
 
     fh = cv.get_fh()

@@ -909,6 +909,14 @@ class PandasFHConverter:
         if isinstance(obj, pd.offsets.BaseOffset):
             return PandasFHConverter.normalize_freq(obj.freqstr)
 
+        if isinstance(obj, pd.Timedelta):
+            from pandas.tseries.frequencies import to_offset
+
+            offset = to_offset(obj)
+            if offset is not None:
+                return PandasFHConverter.normalize_freq(offset.freqstr)
+            return None
+
         if hasattr(obj, "cutoff"):
             # sktime forecasters: extract freq from cutoff attribute
             return PandasFHConverter.extract_freq(obj.cutoff)

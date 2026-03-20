@@ -190,10 +190,51 @@ class BaseForecaster(_PredictProbaMixin, BaseEstimator):
             # skbase < 0.13.1 nested-list bug entirely.
             self_clone = _clone(self, base_cls=BaseObject, clone_plugins=None)
 
+        # For composite forecasters (pipelines, ensembles), the default
+        # clone above may produce nested forecasters without pretrained
+        # state. Walk all nested BaseForecaster components and apply
+        # the pretrained-cloner plugin where applicable.
+        self._apply_pretrained_cloner_recursive(self, self_clone, cloner)
+
         if self.get_config()["check_clone"]:
             _check_clone(original=self, clone=self_clone)
 
         return self_clone
+
+    @staticmethod
+    def _apply_pretrained_cloner_recursive(original, clone, cloner):
+        """Apply pretrained cloner to nested forecaster components.
+
+        Walks all attributes of original and clone in parallel,
+        applying ``_PretrainedCloner`` to any nested ``BaseForecaster``
+        that has pretrained state.
+
+        Handles both direct attributes (e.g., ``self.forecaster``) and
+        lists of ``(name, estimator)`` tuples (e.g., pipeline ``steps``
+        and ``steps_``).
+
+        Parameters
+        ----------
+        original : BaseForecaster
+            The original forecaster (may be composite).
+        clone : BaseForecaster
+            The clone produced by ``_clone``.
+        cloner : _PretrainedCloner
+            Reusable cloner instance.
+        """
+        for key in list(vars(original)):
+            val = getattr(original, key, None)
+            clone_val = getattr(clone, key, None)
+            if isinstance(val, BaseForecaster) and cloner.check(obj=val):
+                setattr(clone, key, cloner.clone(obj=val))
+            elif isinstance(val, list) and isinstance(clone_val, list):
+                if len(val) != len(clone_val):
+                    continue
+                for i, item in enumerate(val):
+                    if isinstance(item, tuple) and len(item) == 2:
+                        name, est = item
+                        if isinstance(est, BaseForecaster) and cloner.check(obj=est):
+                            clone_val[i] = (name, cloner.clone(obj=est))
 
     def __mul__(self, other):
         """Magic * method, return (right) concatenated TransformedTargetForecaster.

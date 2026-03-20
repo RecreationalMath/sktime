@@ -137,7 +137,7 @@ class ResidualBoostingForecaster(BaseForecaster):
             time_idx = y.index.get_level_values(-1).unique()
         else:
             time_idx = y.index
-        insample_fh = ForecastingHorizon(time_idx, is_relative=False)
+        insample_fh = ForecastingHorizon(time_idx, is_relative=False, freq=y.index)
 
         insample_preds = self.base_insample_.predict(fh=insample_fh, X=X)
 

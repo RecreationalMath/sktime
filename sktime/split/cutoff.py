@@ -95,7 +95,14 @@ def _check_cutoffs_fh_y(
         if ``cutoffs`` and ``fh`` type combination is not supported
     """
     max_cutoff = np.max(cutoffs)
-    max_fh = fh.max()
+
+    # When fh has deferred nanos (timedelta input, freq not set),
+    # fh.max() raises ValueError. Use to_pandas()[-1] instead,
+    # which returns the original timedelta for datetime-cutoff checks.
+    if hasattr(fh, "_values_are_nanos") and fh._values_are_nanos:
+        max_fh = fh.to_pandas()[-1]
+    else:
+        max_fh = fh.max()
 
     msg = "`fh` is incompatible with given `cutoffs` and `y`."
     if is_int(x=max_cutoff) and is_int(x=max_fh):
@@ -172,6 +179,13 @@ class CutoffSplitter(BaseSplitter):
             window_length=self.window_length, n_timepoints=n_timepoints
         )
         _check_cutoffs_and_y(cutoffs=cutoffs, y=y)
+
+        # Resolve deferred nanos for integer-cutoff case only.
+        # When cutoffs are datetimes, fh must remain as timedelta values
+        # for datetime + timedelta arithmetic below.
+        if array_is_int(cutoffs):
+            fh.freq = y
+
         _check_cutoffs_fh_y(cutoffs=cutoffs, fh=fh, y=y)
 
         for cutoff in cutoffs:

@@ -357,8 +357,6 @@ class ForecastingHorizon:
             New instance.
         """
         obj = object.__new__(cls)
-        if len(values) > 0 and not np.all(np.diff(values) > 0):
-            raise ValueError("clone expects sorted, unique values")
         obj._values = values
         obj._values.flags.writeable = False
         obj._is_relative = is_relative

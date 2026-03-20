@@ -400,7 +400,7 @@ def test_predict_residuals():
 
     y = _make_series(n_columns=1)
     y_train, y_test = temporal_train_test_split(y)
-    fh = ForecastingHorizon(y_test.index, is_relative=False)
+    fh = ForecastingHorizon(y_test.index, is_relative=False, freq=y.index)
     forecaster = ThetaForecaster(sp=12)
     forecaster.fit(y_train, fh=fh)
 

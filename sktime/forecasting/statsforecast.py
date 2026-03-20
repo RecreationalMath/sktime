@@ -956,7 +956,7 @@ class StatsForecastMSTL(_GeneralisedStatsForecastAdapter):
         _fh = _fh.to_relative(self.cutoff)
 
         if _fh.is_all_in_sample():
-            _fh = ForecastingHorizon(y.index, is_relative=False)
+            _fh = ForecastingHorizon(y.index, is_relative=False, freq=y.index)
             _fh = _fh.to_relative(self.cutoff)
         return _fh
 

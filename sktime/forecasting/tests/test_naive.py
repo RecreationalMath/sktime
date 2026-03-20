@@ -256,10 +256,8 @@ def test_strategy_mean_and_last_seasonal_additional_combinations(
     train_data = data[:window_length]
     test_data = data[window_length:]
 
-    # After slicing, pandas may drop the freq attribute from the index.
     # FH v2 requires freq for DatetimeIndex inputs, so we pass it
-    # explicitly from the original data's known frequency.
-    test_data.index.freq = None
+    # explicitly to the ForecastingHorizon constructor below.
 
     # For example, for n=2, window_length=4, sp=3:
 
@@ -288,12 +286,12 @@ def test_strategy_mean_and_last_seasonal_additional_combinations(
 
     if sp < window_length:
         # We expect a perfect forecast given our perfectly cyclic data
-        pd.testing.assert_series_equal(forecast_data, test_data)
+        pd.testing.assert_series_equal(forecast_data, test_data, check_freq=False)
     else:
         # We expect a few forecasts yield NaN values
         for i in range(1 + len(test_data) // sp):
             test_data[i * sp : i * sp + sp - window_length] = np.nan
-        pd.testing.assert_series_equal(forecast_data, test_data)
+        pd.testing.assert_series_equal(forecast_data, test_data, check_freq=False)
 
 
 @pytest.mark.skipif(

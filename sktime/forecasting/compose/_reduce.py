@@ -1752,7 +1752,16 @@ def _create_fcst_df(target_date, origin_df, fill=None):
     """
     if not isinstance(target_date, ForecastingHorizon):
         ix = pd.Index(target_date)
-        fh = ForecastingHorizon(ix, is_relative=False)
+        # Extract freq from the origin dataframe's index.
+        # For hierarchical data, the datetime level is the last level
+        # of the MultiIndex. If freq is not set, infer it.
+        src_index = origin_df.index
+        if isinstance(src_index, pd.MultiIndex):
+            src_index = src_index.get_level_values(-1)
+        freq = getattr(src_index, "freq", None)
+        if freq is None and isinstance(src_index, pd.DatetimeIndex):
+            freq = pd.infer_freq(src_index.unique())
+        fh = ForecastingHorizon(ix, is_relative=False, freq=freq)
     else:
         fh = target_date.to_absolute()
 

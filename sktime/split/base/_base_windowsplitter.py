@@ -138,12 +138,14 @@ class BaseWindowSplitter(BaseSplitter):
             name="initial_window",
         )
         fh = _check_fh(self.fh)
-        # Resolve deferred nanos (freq-less TimedeltaIndex input) to
-        # integer steps using y's frequency, before any fh arithmetic.
-        fh.freq = y
         _check_window_lengths(
             y=y, fh=fh, window_length=window_length, initial_window=initial_window
         )
+        # Resolve deferred nanos (freq-less TimedeltaIndex input) to
+        # integer steps using y's frequency.  Must happen after
+        # _check_window_lengths, which expects timedelta fh values
+        # when window_length is a DateOffset.
+        fh.freq = y
 
         if self._initial_window is not None:
             yield self._split_for_initial_window(y)
@@ -164,6 +166,8 @@ class BaseWindowSplitter(BaseSplitter):
             Integer indices of the train/test windows
         """
         fh = _check_fh(self.fh)
+        # Resolve deferred nanos before any fh arithmetic.
+        fh.freq = y
         if not self.start_with_window:
             raise ValueError(
                 "`start_with_window` must be True if `initial_window` is given"
