@@ -101,8 +101,10 @@ class _BaseWindowForecaster(BaseForecaster):
         y_train = self._y
 
         # generate cutoffs from forecasting horizon, note that cutoffs are
-        # still based on integer indexes, so that they can be used with .iloc
-        cutoffs = fh.to_relative(self.cutoff) + len(y_train) - 2
+        # still based on integer indexes, so that they can be used with .iloc.
+        # Convert to numpy array because CutoffSplitter expects np.array
+        # or pd.Index, not a ForecastingHorizon object.
+        cutoffs = (fh.to_relative(self.cutoff) + len(y_train) - 2).to_numpy()
         cv = CutoffSplitter(cutoffs, fh=1, window_length=self.window_length_)
         return self._predict_moving_cutoff(y_train, cv, X, update_params=False)
 

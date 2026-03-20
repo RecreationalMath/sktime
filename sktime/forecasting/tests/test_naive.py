@@ -256,7 +256,9 @@ def test_strategy_mean_and_last_seasonal_additional_combinations(
     train_data = data[:window_length]
     test_data = data[window_length:]
 
-    # Forecast data does not retain the original frequency
+    # After slicing, pandas may drop the freq attribute from the index.
+    # FH v2 requires freq for DatetimeIndex inputs, so we pass it
+    # explicitly from the original data's known frequency.
     test_data.index.freq = None
 
     # For example, for n=2, window_length=4, sp=3:
@@ -276,7 +278,7 @@ def test_strategy_mean_and_last_seasonal_additional_combinations(
     # dtype: float64
 
     # forecast the next <(n-1) x window_length> hours with periodicity of <sp> hours
-    fh = ForecastingHorizon(test_data.index, is_relative=False)
+    fh = ForecastingHorizon(test_data.index, is_relative=False, freq=freq)
     model = NaiveForecaster(strategy=strategy, sp=sp)
     model.fit(train_data)
     forecast_data = model.predict(fh)

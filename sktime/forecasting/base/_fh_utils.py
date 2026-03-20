@@ -529,8 +529,17 @@ class PandasFHConverter:
     # original UTC offset information due to the period-ordinal round-trip.
     # tests for this should also be included in the test suite
     # to cover edge cases around DST transitions.
+    # Frequencies whose periods have variable length (months have
+    # 28-31 days, quarters 90-92 days, years 365-366 days).  For
+    # these, a fixed sub-period offset from the period start does
+    # not generalize across periods — e.g. 29 days (June) is wrong
+    # for July (31 days).  When the cutoff falls on the last
+    # calendar day of its period, we use ``to_timestamp(how="end")``
+    # instead of the fixed-offset approach.
+    _VARIABLE_LENGTH_FREQ_BASES = {"M", "Q", "Y", "A"}
+
     @staticmethod
-    def steps_to_datetime(values, freq, tz=None, sub_period_offset=None):
+    def steps_to_datetime(values, freq, tz=None, sub_period_offset=None, cutoff=None):
         """Convert integer step values (period ordinals) to DatetimeIndex.
 
         Used by ``to_absolute_index`` when the cutoff is a datetime
@@ -545,6 +554,15 @@ class PandasFHConverter:
         sub-period precision from the cutoff (e.g. a cutoff at 12:00
         with daily freq produces timestamps at 12:00, not midnight).
         Refer issue #5186.
+
+        For variable-length periods (monthly, quarterly, yearly) where
+        the cutoff falls on the last calendar day of its period (e.g.
+        2003-06-30 for monthly data), a fixed sub-period offset would
+        produce incorrect dates in months with more days (e.g. July 30
+        instead of July 31).  In this case the method uses
+        ``to_timestamp(how="end").normalize()`` to snap to the correct
+        period-end date, and only adds the sub-day portion of the
+        offset (to preserve time-of-day precision).
 
         If ``tz`` is provided, the tz-naive DatetimeIndex is first
         localized to UTC (which has no DST transitions), then
@@ -570,6 +588,10 @@ class PandasFHConverter:
             timestamps. Computed from the cutoff's position within
             its period (e.g. 12 hours for a cutoff at noon with
             daily freq). Applied before timezone handling.
+        cutoff : pd.Timestamp or None
+            The tz-naive cutoff timestamp. Required for detecting
+            period-end anchored variable-length frequencies. If
+            None, the fixed-offset approach is always used.
 
         Returns
         -------
@@ -582,9 +604,31 @@ class PandasFHConverter:
             If ``freq`` is None (from ``PeriodIndex.from_ordinals``).
         """
         period_idx = pd.PeriodIndex.from_ordinals(values.copy(), freq=freq)
-        dt_idx = period_idx.to_timestamp()
-        if sub_period_offset is not None and sub_period_offset > pd.Timedelta(0):
-            dt_idx = dt_idx + sub_period_offset
+
+        # For variable-length periods (M, Q, Y) with period-end cutoffs,
+        # use to_timestamp(how="end") instead of a fixed sub-period offset.
+        use_period_end = False
+        if cutoff is not None:
+            base = freq.split("-")[0].rstrip("ES")
+            if base in PandasFHConverter._VARIABLE_LENGTH_FREQ_BASES:
+                # Check if cutoff falls on the last calendar day of its
+                # period by comparing to the day before the next period.
+                period = cutoff.to_period(freq)
+                last_day = (period + 1).to_timestamp() - pd.Timedelta(days=1)
+                use_period_end = cutoff.normalize() == last_day.normalize()
+
+        if use_period_end:
+            # Snap to the last calendar day of each period.
+            dt_idx = period_idx.to_timestamp(how="end").normalize()
+            # Preserve sub-day precision (e.g. noon cutoff → noon output).
+            sub_day = cutoff - cutoff.normalize()
+            if sub_day > pd.Timedelta(0):
+                dt_idx = dt_idx + sub_day
+        else:
+            dt_idx = period_idx.to_timestamp()
+            if sub_period_offset is not None and sub_period_offset > pd.Timedelta(0):
+                dt_idx = dt_idx + sub_period_offset
+
         if tz is not None:
             # localize to UTC first (no DST ambiguity), then convert
             # to target tz. Direct tz_localize(tz) would raise

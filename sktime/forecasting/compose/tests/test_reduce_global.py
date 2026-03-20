@@ -284,7 +284,9 @@ def test_equality_transfo_nontranso(regressor):
     """Test that recursive reducers return same results for global / local forecasts."""
     y = load_airline()[:36]
     y_train, y_test = temporal_train_test_split(y, test_size=12)
-    fh = ForecastingHorizon(y_test.index, is_relative=False)
+    # temporal_train_test_split may drop freq from the index, so pass
+    # freq explicitly from the original series.
+    fh = ForecastingHorizon(y_test.index, is_relative=False, freq=y.index)
 
     lag_vec = [i for i in range(6, 0, -1)]
     kwargs = {

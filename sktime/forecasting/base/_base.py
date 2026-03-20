@@ -152,23 +152,48 @@ class BaseForecaster(_PredictProbaMixin, BaseEstimator):
         _check_estimator_deps(self)
         self._state = "new"
 
-    @classmethod
-    def _get_clone_plugins(cls):
-        """Get clone plugins for BaseForecaster.
+    def clone(self):
+        """Clone the forecaster, preserving pretrained state if present.
 
-        Overrides the default skbase clone behavior to preserve
-        pretrained attributes when cloning forecasters.
+        Overrides skbase's ``BaseObject.clone`` to work around a bug in
+        scikit-base < 0.13.1 where ``_clone()`` uses ``list.append``
+        instead of ``list.extend`` when merging custom clone plugins
+        with the defaults. This creates a nested list
+        ``[CustomPlugin, [Default1, Default2, ...]]`` and the iteration
+        fails with ``TypeError: 'list' object is not callable`` when it
+        tries to instantiate the nested list as a plugin class.
 
-        The ``_PretrainedCloner`` plugin ensures that when a forecaster
-        with pretrained state is cloned (e.g., during cross-validation),
-        the pretrained attributes are copied to the clone.
+        The workaround checks the ``_PretrainedCloner`` plugin directly,
+        bypassing skbase's plugin-merging logic entirely.  If the plugin
+        does not apply (the common case), the standard ``_clone`` is
+        called with ``clone_plugins=None`` so skbase only iterates over
+        its own flat ``DEFAULT_CLONE_PLUGINS`` list — which is correct
+        in every version.
 
         Returns
         -------
-        list
-            List containing ``_PretrainedCloner`` plugin class.
+        BaseForecaster
+            A clone of this forecaster. If the forecaster has pretrained
+            state (``_pretrained_attrs``), it is deep-copied to the clone.
         """
-        return [_PretrainedCloner]
+        from skbase.base._base import BaseObject
+        from skbase.base._clone_base import _check_clone, _clone
+
+        # Check if the pretrained-cloner plugin applies to this instance.
+        # _PretrainedCloner preserves pretrained attributes across clone
+        # operations (e.g., during cross-validation).
+        cloner = _PretrainedCloner(safe=True, base_cls=BaseObject)
+        if cloner.check(obj=self):
+            self_clone = cloner.clone(obj=self)
+        else:
+            # Default clone path — no custom plugins, avoids the
+            # skbase < 0.13.1 nested-list bug entirely.
+            self_clone = _clone(self, base_cls=BaseObject, clone_plugins=None)
+
+        if self.get_config()["check_clone"]:
+            _check_clone(original=self, clone=self_clone)
+
+        return self_clone
 
     def __mul__(self, other):
         """Magic * method, return (right) concatenated TransformedTargetForecaster.

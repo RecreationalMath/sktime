@@ -59,6 +59,10 @@ def _check_cutoffs_against_test_windows(cutoffs, windows, fh, y):
     # We check for the last value. Some windows may be incomplete, with no first
     # value, whereas the last value will always be there.
     fh = check_fh(fh)
+    # Resolve deferred nanos so fh[-1] returns a step count, not nanoseconds.
+    # y may be a numpy array (integer-indexed) or a pd.Series (datetime-indexed).
+    if hasattr(y, "index"):
+        fh.freq = y.index
     if is_int(fh[-1]):
         expected = np.array([window[-1] - fh[-1] for window in windows])
     elif array_is_timedelta_or_date_offset(fh):
